@@ -12,9 +12,9 @@
 
 ### 1.2 목표
 
-- **수집**: 동시에 10개 이상의 오픈채팅방을 PC에서 열어둔 상태에서, 표시 영역의 텍스트를 주기적으로 수집·저장한다.
-- **주기별 분석**: 설정된 분석 주기마다(시간·일·주 등) 방·기간 단위로 LLM(가장 저렴한 모델델)이 채팅을 읽고 **구조화된 주기별 요약(JSON)** 을 생성한다.
-- **누적·통계**: 주기별 요약을 누적 저장하여 **주제 빈도·감성 추이·이상치** 등의 시계열 통계를 만든다.
+- **수집**: **20개 이상** 오픈채팅방을 PC에서 **항상 열어둔 상태**에서, **10분** 주기로 표시 영역 텍스트를 수집·SQLite에 저장한다. 방 제목은 설정값과 **완전 일치**(안 읽음 수 `(N)` 접미사는 매칭 전 제거).
+- **주기별 분석**: 설정된 분석 주기마다(시간·일·주 등) 방·기간 단위로 LLM(`.env`에서 지정한 모델)이 채팅을 읽고 **구조화된 주기별 요약(JSON)** 을 생성한다.
+- **누적·통계**: 주기별 요약을 누적하여 **주제·태그 빈도 추이**와 **패치/업데이트 반응**만 집계한다. 소수 닉네임이 과대 대표되지 않도록 주제별 **고유 참여 닉 수(`distinct_nicks`)** 를 함께 산출한다.
 - **컨텍스트 주입**: 업데이트 노트·예정 일정 등 **운영자 제공 문서**를 분석·리포트 파이프라인에 넣어 품질을 높인다.
 - **생성**: OpenAI API 또는 Claude / Gemini / Codex 등 **CLI·API**를 통해 구조화된 분석 결과를 만든 뒤, **HTML 리포트**로 출력한다.
 - **운영**: **UI에서 수집·분석·리포트 주기**를 설정하고, **결과를 지정 폴더**에 저장한다.
@@ -34,17 +34,19 @@
 
 | 용어 | 설명 |
 |------|------|
-| **수집 텍스트** | 카카오톡 PC 클라이언트 창에 **현재 렌더링된** 메시지 영역에서 읽힌 문자열(접근성/OCR 등). 스크롤 밖의 과거 메시지는 본 설계의 기본 범위에 포함되지 않을 수 있음. |
+| **수집 텍스트** | 카카오톡 PC 채팅 리스트(`EVA_VH_ListControl_Dblclk`)에 **Ctrl+A/C로 복사한** 문자열. 스크롤 밖 과거 메시지는 기본 범위에 포함되지 않을 수 있음. |
 | **분석 주기 (analysis period)** | 한 번의 LLM 분석이 다루는 시간 길이. 설정 가능(예: 1시간, 6시간, 1일, 1주). |
 | **기간 버킷 (period bucket)** | 분석 주기 단위로 잘린 시간 구간 하나. `period_start`, `period_end`, 사람이 읽기 좋은 `period_key`(예: `2026-05-12`, `2026-05-12T14`, `2026-W19`)로 식별. |
-| **주기별 요약 (periodic insight)** | 한 방·한 기간 버킷의 채팅을 LLM이 읽어 만든 구조화 JSON. 주제·언급 수·감성·대표 인용 등을 포함. |
-| **인사이트 스토어** | 주기별 요약을 누적 저장하는 로컬 DB. 시계열 통계와 리포트의 1차 입력원. |
-| **누적 통계** | 인사이트 스토어를 집계해 만든 시계열(주제 추이, 감성 추이, 이상치 등). |
+| **주기별 요약 (periodic insight)** | 한 방·한 기간 버킷의 채팅을 LLM이 읽어 만든 구조화 JSON. 주제·태그·언급 수·`distinct_nicks`·패치 반응·인용 참조(`message_id` 등)를 포함. |
+| **인사이트 스토어** | 주기별 요약을 누적 저장하는 SQLite 테이블. 통계·리포트의 1차 입력원. |
+| **누적 통계** | 인사이트 스토어를 집계한 **주제·태그 빈도 추이**와 **패치 반응 누적**만 해당. |
+| **Quote Resolver** | 리포트 생성 시 `messages` 테이블에서 **원문 검색**으로 예시 인용문을 가져오는 단계. HTML에는 DB 원문을 그대로 넣는다. |
 
 ### 2.2 수집 범위
 
-- **대상**: 사용자 본인 PC에서 **직접 연 상태인** 오픈채팅방.
-- **내용**: 해당 창에 **표시되는** 텍스트에 한정(구현에 따라 최근 N줄 등).
+- **대상**: 사용자 PC에서 **직접 연 상태인** 오픈채팅방 **20개 이상**. 닫히거나 찾을 수 없는 방은 해당 수집 사이클만 스킵.
+- **내용**: 해당 창 리스트 컨트롤에 **현재 로드된** 텍스트. 이미지·이모티콘·삭제된 메시지는 파서에서 **제외**.
+- **제외 데이터**: UIAutomation·OCR 경로는 사용하지 않는다.
 
 ---
 
@@ -57,8 +59,8 @@
 
 ### 3.2 시나리오
 
-1. 사용자가 카카오톡 PC에서 게임 관련 오픈채팅 **10개 이상**을 연다.
-2. 앱이 주기적으로 각 창에서 텍스트를 읽어 로컬 DB에 쌓는다.
+1. 사용자가 카카오톡 PC에서 게임 관련 오픈채팅 **20개 이상**을 연다.
+2. 수집기가 **10분**마다 각 방 창에서 텍스트를 읽어 SQLite `messages`에 쌓는다(방별 격리·중복 제거).
 3. 설정된 분석 주기마다 **주기별 분석 잡**이 돌아 각 방·기간 버킷별 구조화 요약을 인사이트 스토어에 저장한다.
 4. 사용자가 **업데이트 노트 파일**(및 예정 일정) 경로를 지정한다.
 5. 설정된 주기(또는 수동 실행)로 리포트 잡이 돌아간다: **누적된 주기별 요약 + 통계 + 업데이트 노트 → LLM 합성 → HTML 저장**.
@@ -68,33 +70,40 @@
 
 ### 4. 데이터 흐름 요약
 
-1. **Collector** → 원시 이벤트(SQLite).
-2. **Bucketizer → Normalizer → Masking → Periodic Analyzer** → 주기별 요약(JSON)을 **인사이트 스토어**에 누적.
-3. **Aggregator** → 인사이트 스토어를 집계해 시계열·이상치 산출.
-4. **리포트 잡**: 누적 주기별 요약 + 통계 + Context loader 문서 → **Model router** → JSON 스키마 → **HTML 렌더러**.
+1. **Collector** (클립보드) → **Parser/Normalizer** → 원시 메시지(SQLite `messages`).
+2. **Bucketizer → Periodic Analyzer** → 주기별 요약(JSON)을 **인사이트 스토어**에 누적.
+3. **Aggregator** → **주제·태그 추이**, **패치 반응**만 산출.
+4. **리포트 잡**: 누적 요약 + 통계 + Context loader → **Model router** (`.env`) → **Quote Resolver**(원문 검색) → **HTML 렌더러**.
+
+구현 단계·파서·통계 상세는 `development-plan.md`를 따른다.
 
 ---
 
 ## 5. 상세 설계
 
-### 5.1 Collector (Windows)
+### 5.1 Collector (Windows, 클립보드)
 
-- **창 식별**: 다중 오픈채팅 창을 창 핸들, 클래스명, 타이틀 패턴 등으로 구분.
-- **텍스트 획득 우선순위**: OS/UIAutomation 접근성 트리에서 읽기 가능한 노드 → 불가 시 채팅 리스트 영역 **캡처 후 OCR**(설정으로 비활성화 가능).
-- **중복·스크롤**: 동일 줄 반복, 스크롤로 인한 재수집은 Normalizer에서 해시·순서로 제거.
-- **실패 시**: 해당 방만 경고 로그; 리포트 메타에 **커버리지 낮음** 플래그.
+1차 구현은 `kakao_clipboard_crawler.py`와 동일한 방식이다.
+
+- **창 식별**: `EnumWindows` + 제목 **완전 일치**. `normalize_title(title)`로 끝의 `(숫자)`(안 읽음 수) 제거 후 `rooms` 설정과 비교.
+- **텍스트 획득**: 채팅 리스트 자식 창 클래스 `EVA_VH_ListControl_Dblclk`에 **Ctrl+A → Ctrl+C**, 클립보드 UTF-16 텍스트 수신. 수집 후 클립보드 복원(옵션).
+- **다중 방**: 설정된 방 목록을 **순차** 캡처(클립보드 전역). 방마다 `room_id`로 DB·상태 분리.
+- **중복·스크롤**: `content_hash`(방·닉·시각·본문) 및 스냅샷 overlap diff로 신규 메시지만 insert.
+- **실패 시**: 해당 방만 경고 로그; `collect_runs`에 기록. 리포트 메타에 **커버리지 낮음** 가능.
 
 ### 5.2 저장소
 
 #### 5.2.1 원시 이벤트
 
-- **권장**: SQLite. 컬럼 예: `message_id`, `room_id`, `collected_at`, `content_hash`, `raw_text`, `nick_hash`, `source_window_id`.
-- 메시지 단위 또는 수집 배치 단위로 저장. 백업·마이그레이션 정책은 로컬 전용 가정 하에 문서화.
+- **SQLite** 단일 DB (`DATABASE_PATH`, 기본 `data/openchat.db`). 컬럼 예: `message_id`, `room_id`, `collected_at`, `message_at`, `nick`, `body`, `content_hash`.
+- 파싱된 **논리 메시지 1건 = 1행**. 원시 텍스트 TTL **`retention.raw_days = 7`**.
+- 캡처 샘플 형식·파서 규칙은 `development-plan.md` §2 참고.
 
 #### 5.2.2 인사이트 스토어
 
 - 동일 SQLite 안에 별도 테이블로 주기별 분석 결과를 저장.
-- 스키마 예: `room_id`, `period_key`, `period_start`, `period_end`, `period_type`(`hourly` / `daily` / `weekly` / `custom`), `message_count`, `coverage`, `topics_json`, `patch_reactions_json`, `new_terms_json`, `analyzer_model`, `analyzer_version`, `prompt_hash`, `created_at`.
+- 스키마 예: `room_id`, `period_key`, `period_start`, `period_end`, `period_type`(`hourly` / `daily` / `weekly` / `custom`), `message_count`, `coverage`, `topics_json`, `patch_reactions_json`, `analyzer_model`, `analyzer_version`, `prompt_hash`, `created_at`.
+- 집계 캐시 테이블: `topic_stats`, `patch_reaction_stats` (상세는 `development-plan.md` §4).
 - 분석은 **idempotent**: 같은 `(room_id, period_key, analyzer_version)`은 덮어쓰되, 버전이 다르면 이력으로 남길 수 있음.
 - `period_type`이 다른 분석 결과는 같은 테이블 안에 공존 가능(예: 평소 일간, 이슈 발생 시 임시로 시간 단위 재분석).
 
@@ -113,15 +122,15 @@
 
 #### 5.3.2 입력 준비
 
-- 해당 방·기간 버킷의 원시 이벤트를 시간순으로 정렬·중복제거.
-- `mask_nicknames` 등 마스킹 옵션이 켜져 있으면 닉네임·연락처·계정 패턴을 분석 전에 치환.
-- 토큰 추정치가 `analyzer.two_stage_threshold_tokens`(예: 100K)을 넘으면 **서브 버킷 분할(2-stage)**: 해당 기간을 더 잘게 쪼개 1차 요약 → 원래 버킷 단위로 2차 통합 요약. 결과는 원래 `period_key`로 저장.
+- 해당 방·기간 버킷의 `messages`를 시간순 정렬·중복 제거(이미지/이모티콘/삭제·봇 등은 파서 단계에서 제외).
+- 주제별 **`distinct_nicks`**(고유 닉 수)를 LLM 출력에 포함. `mentions`만으로 상위 주제를 정하지 않고, `min_distinct_nicks`(기본 3) 미만은 **표본 부족** 처리.
+- 토큰 추정치가 `analyzer.two_stage_threshold_tokens`(예: 100K)을 넘으면 **서브 버킷 분할(2-stage)**. 결과는 원래 `period_key`로 저장.
 
 #### 5.3.3 LLM 분석 호출
 
 - 프롬프트는 채팅 원문을 `message_id`와 함께 넣고, **고정된 JSON 스키마**로만 출력하도록 강제(Structured Outputs / 함수 호출 / 후처리 파서).
-- 분석 모델은 한국어 자연스러움·구조화 출력 안정성이 강한 모델(예: Claude Sonnet, GPT-5 계열)을 권장.
-- **인용 제약**: 출력의 `representative_quotes.text`는 입력 메시지의 실제 문자열에서만 발췌하도록 프롬프트로 제약. 사후 검증에서 원문에 없는 인용이 탐지되면 폐기 또는 경고.
+- 분석·리포트 모델은 **`.env`** (`ANALYZER_*`, `REPORTER_*`)로 지정. 비용·품질에 따라 분리 가능.
+- **인용 참조**: Analyzer는 `message_id` 또는 `search_phrase`만 JSON에 남긴다. HTML에 넣을 **원문 문자열은 Quote Resolver**가 `messages`에서 조회·검증한 뒤 **그대로** 삽입한다.
 
 #### 5.3.4 출력 스키마 (예시)
 
@@ -138,12 +147,14 @@
     {
       "tag": "bug | balance | event | ops | meta",
       "title": "보스 B 패턴 무한 루프",
+      "topic_key": "boss_b_infinite_loop",
       "mentions": 23,
-      "sentiment": -0.7,
+      "distinct_nicks": 12,
+      "underrepresented": false,
       "first_seen": "2026-05-12T14:22:00+09:00",
-      "peak_window": "2026-05-12T19:00:00+09:00..2026-05-12T20:00:00+09:00",
-      "representative_quotes": [
-        { "time": "2026-05-12T19:14:00+09:00", "message_id": 12345, "text": "...", "nick_hash": "a1b2" }
+      "quote_refs": [
+        { "message_id": 12345 },
+        { "search_phrase": "무한 루프", "room_id": "..." }
       ]
     }
   ],
@@ -152,14 +163,15 @@
       "patch_item": "캐릭터 X 너프",
       "stance": "negative | neutral | positive | mixed",
       "mentions": 41,
+      "distinct_nicks": 18,
       "summary": "...",
-      "quote_ids": [12345]
+      "quote_refs": [{ "message_id": 12345 }]
     }
-  ],
-  "new_terms": ["..."],
-  "notable_user_hashes": []
+  ]
 }
 ```
+
+`underrepresented`: `distinct_nicks < min_distinct_nicks`일 때 true. 리포트 상위 주제·통계 집계에서 제외 또는 각주.
 
 #### 5.3.5 재현성·버전 관리
 
@@ -169,17 +181,26 @@
 
 ### 5.4 통계·시계열 (Aggregator)
 
-인사이트 스토어를 집계해 리포트와 UI에 쓸 시계열을 만든다.
+인사이트 스토어를 집계해 리포트에 쓸 시계열을 만든다. **본 설계에서 다루는 통계는 아래 두 가지뿐**이다.
 
-- **공통 그레인 정렬**: 서로 다른 `period_type`이 섞여 있을 수 있으므로 집계용으로 **공통 그레인**(예: 일자)으로 합산 또는 평균 정규화.
-- **주제 빈도 추이**: 태그·정규화 키워드별 그레인별 `mentions` 합산 → 라인 차트.
-- **감성 추이**: 태그별 그레인별 가중 평균 `sentiment` → 라인 차트.
-- **이상치 탐지**: 최근 N 그레인 이동평균 대비 z-score가 `stats.anomaly_zscore` 임계를 넘으면 리스크 섹션 후보로 마킹.
-- **패치 반응 누적**: `patch_reactions`를 패치 항목별로 stance 분포 누적, 시간에 따른 호불호 변화 추적.
-- **방별 비교**: 동일 주제가 방마다 다르게 반응하는지 비교 표.
-- **갭 분석**: 업데이트 노트에 없는데 `mentions` 상위인 주제를 별도 리스트.
+#### 5.4.1 주제·태그 빈도 추이
 
-집계는 SQL로 충분히 표현 가능하며, 리포트 렌더 시점에 미리 계산한 결과(JSON 또는 사전 생성 SVG)를 렌더러로 넘긴다.
+- `period_key` × `tag`(또는 `topic_key`)별 `mentions` 합산.
+- 동일 주제에 `distinct_nicks`·`underrepresented`를 함께 저장·표기.
+- 상위 주제 선정: `mentions` 단독 정렬 금지. `distinct_nicks >= min_distinct_nicks` 미만은 집계·리포트 본문에서 제외 또는 각주.
+- 시각화: **기간(period_key) 축**의 태그·주제 추이 차트만 제공.
+
+#### 5.4.2 패치/업데이트 반응
+
+- Context loader의 패치 항목과 `patch_reactions` 매칭.
+- `patch_item` × `period_key`별 `mentions`, `stance` 분포, `distinct_nicks`.
+- **갭 분석**: 업데이트 노트에 없는데 `mentions` 상위인 `topics` 목록.
+
+#### 5.4.3 의도적으로 제외하는 통계
+
+시간대별 건수, 방 간 비교, 이상치(z-score), 신조어·반복 키워드 전용 집계, 감성 추이는 **구현·리포트 모두에서 제외**한다.
+
+집계는 SQL로 표현하고, `topic_stats`·`patch_reaction_stats`에 캐시한 뒤 HTML 렌더러에 전달한다. 수식·후처리 규칙은 `development-plan.md` §5를 따른다.
 
 ### 5.5 Context loader
 
@@ -191,12 +212,13 @@
 
 - **입력**: 리포트 기간(예: 최근 7일)에 해당하는 주기별 요약 목록 + 통계 집계 + 업데이트 노트 요약/발췌.
 - **출력**: **구조화된 JSON 스키마**(섹션별 제목·요약·태그·근거 메시지·인용 ID 등) → HTML로 렌더.
-- **할루시네이션 완화**: 인용은 인사이트 스토어의 `representative_quotes`에 등록된 텍스트에서만 사용하도록 프롬프트 제약. 출력 후 인용문 존재 여부 사후 검증.
+- **할루시네이션 완화**: HTML 인용은 **Quote Resolver**가 `messages`에서 조회한 원문만 사용. LLM이 생성한 인용문을 HTML에 직접 넣지 않는다.
+- **예시 인용**: `quote_refs` → DB 검색 → **원문·닉·시간 그대로** HTML 블록 삽입(마스킹 없음).
 - **토큰 관리**: 주기별 요약 JSON은 일반적으로 수만~수십만 토큰 내. 큰 경우 주제별로 부분 합성 후 머지(map-reduce). 원시 채팅은 합성 단계에서 직접 넣지 않음.
 
 ### 5.7 Model router
 
-- **분석용 모델**과 **리포트 합성용 모델**을 각각 프로바이더·모델·엔드포인트로 설정.
+- **분석용·리포트 합성용** 프로바이더·모델·API 키는 **`.env`** (`ANALYZER_*`, `REPORTER_*`)에서 로드.
 - **OpenAI API**(HTTP)와 **Claude / Gemini / Codex CLI**(서브프로세스, stdin/stdout 또는 파일)를 공통 인터페이스로 추상화.
 - 재시도·타임아웃·토큰 한도 처리. 주기별 분석은 방·기간 버킷 단위로 병렬 호출 가능.
 
@@ -204,13 +226,12 @@
 
 **섹션 예시**
 
-1. **요약**: 기간, 방 개수, 메시지·주기별 요약 수, 상위 주제 5개.
-2. **통계·시계열**: 주제 빈도 추이, 감성 추이, 방별 비교 차트(클라이언트 사이드 Chart.js 또는 사전 생성 SVG).
-3. **주제별 논의**: 버그 / 밸런스 / 이벤트 / 운영 등 태그, 대표 인용 포함.
-4. **업데이트 노트 대조**: 패치 항목별 누적 stance·언급량·갭(노트에 없는데 많이 나온 주제).
-5. **다음 주 예정과의 정렬**: 기대·우려·요청.
-6. **리스크·이상치**: Aggregator가 마킹한 이상치 주제, 반복 불만, 버그 의심 다발.
-7. **메타**: 사용된 분석 모델·리포트 모델, 분석 주기·프롬프트·분석 버전, 소스 기간, 보관 정책 요약.
+1. **요약**: 기간, 방 개수, 분석 버킷 수, 상위 주제(표본 충분한 것만).
+2. **통계·시계열**: **주제·태그 빈도 추이**, **패치 반응** 차트(period_key 축).
+3. **주제별 논의**: 태그별 요약 + Quote Resolver **원문 인용**.
+4. **업데이트 노트 대조**: 패치 항목별 stance·언급량·`distinct_nicks`·갭 주제.
+5. **다음 주 예정과의 정렬**: 기대·우려·요청(로드맵 Context).
+6. **메타**: `.env` 모델·분석 주기·버전·소스 기간·원시 7일 보관·인용 검증 실패 건수.
 
 **파일 배치**
 
@@ -220,7 +241,7 @@
 
 ### 5.9 스케줄·UI
 
-- **수집 주기**: 분 단위(예: 1~5분).
+- **수집 주기**: 기본 **10분** (`COLLECT_INTERVAL_MINUTES` 또는 `schedule.collect`).
 - **분석 주기 (`analyzer.period`)**: `hourly`, `6h`, `daily`, `weekly` 등에서 선택. 또는 cron 유사 문자열로 임의 주기. 수동 실행·과거 버킷 재분석도 지원.
 - **분석 실행 시각 (`schedule.analyze`)**: 위 주기의 버킷이 닫힌 직후 (예: 일간이면 다음 날 새벽) 실행.
 - **리포트 주기 (`schedule.report`)**: 매일 특정 시각, 매주 특정 요일·시각, 또는 cron 유사 문자열. 분석 주기와 독립.
@@ -240,35 +261,37 @@
 
 ## 6. 설정 항목 목록
 
-| 키 | 설명 |
+환경 변수는 **`.env`** 에 두고, 앱 시작 시 로드한다. 상세 키 목록은 `development-plan.md` §6.
+
+| 키 (`.env` / 설정) | 설명 |
 |----|------|
-| `output_dir` | HTML 리포트 루트 경로 |
-| `tz` | 기간 버킷·스케줄에 사용할 타임존 (예: `Asia/Seoul`) |
-| `schedule.collect` | 수집 주기 |
-| `analyzer.period` | 분석 주기 (`hourly` / `6h` / `daily` / `weekly` / cron) |
-| `schedule.analyze` | 주기별 분석 실행 시각·트리거 |
-| `schedule.report` | 리포트 생성 주기 (cron 또는 UI 매핑 구조체) |
-| `rooms` | 방 매핑(창 식별자 ↔ 사람이 읽는 라벨) |
-| `analyzer.provider` / `analyzer.model` | 분석 모델 |
+| `DATABASE_PATH` | SQLite 경로 (기본 `data/openchat.db`) |
+| `TZ` | 기간 버킷·스케줄 타임존 (예: `Asia/Seoul`) |
+| `COLLECT_INTERVAL_MINUTES` | 수집 주기 (기본 **10**) |
+| `ROOMS_CONFIG` | 방 목록 YAML (`canonical_title` 완전 일치) |
+| `MIN_DISTINCT_NICKS` | 주제·패치 반응 최소 고유 닉 수 (기본 3) |
+| `ANALYZER_PROVIDER` / `ANALYZER_MODEL` / `ANALYZER_API_KEY` | 주기별 분석 LLM |
+| `ANALYZER_PERIOD` | 분석 주기 (`1d`, `1w` 등) |
+| `ANALYZER_PROMPT_VERSION` | 프롬프트 버전 태그 |
 | `analyzer.two_stage_threshold_tokens` | 서브 버킷 분할 임계 |
-| `analyzer.prompt_version` | 분석 프롬프트 버전 태그 |
-| `reporter.provider` / `reporter.model` | 리포트 합성 모델 |
-| `reporter.window` | 한 리포트가 다루는 기간 (예: `7d`, `4w`) |
-| `stats.anomaly_zscore` | 이상치 임계 |
-| `stats.common_grain` | 통계 그레인 (서로 다른 `period_type` 정규화용, 예: `daily`) |
-| `retention.raw_days` / `retention.insight_days` | 원시·인사이트 TTL |
-| `patchnotes.paths`, `roadmap.paths` | 업데이트 노트·예정 파일 |
-| `mask_nicknames` | 분석·인용 시 닉네임 마스킹 |
-| `quote_max_chars` | 근거 인용 최대 글자 |
+| `REPORTER_PROVIDER` / `REPORTER_MODEL` / `REPORTER_API_KEY` | 리포트 합성 LLM |
+| `REPORTER_WINDOW` | 리포트 기간 (예: `7d`) |
+| `RETENTION_RAW_DAYS` | 원시 메시지 TTL (기본 **7**) |
+| `retention.insight_days` | 인사이트·집계 캐시 TTL |
+| `PATCHNOTES_PATH`, `ROADMAP_PATH` | 업데이트 노트·예정 |
+| `OUTPUT_DIR` | HTML 리포트 루트 |
+| `schedule.analyze` / `schedule.report` | 분석·리포트 cron (후속 UI와 병행 가능) |
+| `exclude_nicks`, `exclude_body_patterns` | 파서 제외 (봇, 사진, 삭제 메시지 등) |
 
 ---
 
 ## 7. 보안·프라이버시·보존 기간
 
-- **비밀**: API 키·CLI 경로는 OS 자격 증명 저장소 또는 로컬 암호화 설정 파일.
-- **데이터 최소화**: 원시 텍스트는 해당 버킷 분석 완료 후 `retention.raw_days` TTL로 정리. 인사이트 스토어는 통계용이라 더 길게 보관 가능.
-- **외부 전송 최소화**: 주기별 분석은 원시 채팅을 LLM에 보내지만, 리포트 합성은 **인사이트 스토어의 JSON 요약만** 외부로 보내도록 기본 설정 → 장기적으로 외부 전송량 감소.
-- **마스킹**: 분석 전 단계에서 닉네임·연락처·계정 패턴 마스킹 옵션. 클라우드 LLM/임베딩 사용 시 전송 구간 TLS.
+- **비밀**: API 키는 **`.env`** (git 제외). 필요 시 OS 자격 증명 저장소로 이전 가능.
+- **데이터 최소화**: 원시 `messages`는 **`RETENTION_RAW_DAYS=7`** 이후 삭제 job. 인사이트·`topic_stats`는 더 길게 보관 가능.
+- **외부 전송**: 주기별 분석은 원시 채팅을 LLM에 전송. 리포트 합성은 **인사이트 JSON만** 외부로 보내도록 기본 설정 → 장기적으로 외부 전송량 감소.
+- **인용·닉네임**: 리포트 HTML에는 **원문·닉 그대로** 표기(마스킹 없음). 로컬 DB·리포트 파일 접근 통제는 운영자 책임.
+- **TLS**: 클라우드 LLM API 호출 구간 HTTPS.
 
 ---
 
@@ -276,14 +299,14 @@
 
 | 리스크 | 완화 |
 |--------|------|
-| 카카오 PC 클라이언트 UI 변경 | Collector 어댑터 버전 관리; 레이아웃 깨짐 시 OCR 폴백·수동 영역 지정 |
-| OCR 비용·오인식 | 텍스트 추출 우선; OCR은 최후 수단 |
-| 분석 LLM 비용 | 호출이 방·기간 버킷 단위로 예측 가능; 짧은 주기 선택 시 호출 수 증가에 유의. 활성 방 우선, 휴면 방은 더 긴 주기 옵션 |
-| 컨텍스트 초과(폭주한 버킷) | 서브 버킷 분할(2-stage); 임계는 `analyzer.two_stage_threshold_tokens` |
-| LLM 할루시네이션 | JSON 스키마 강제 + 인용은 원문에 존재하는 텍스트만; 사후 검증 |
-| 주기 변경에 따른 시계열 단절 | `stats.common_grain`으로 정규화; 필요 구간은 새 주기로 재분석 |
-| 분석 누락·재분석 필요 | 분석은 idempotent; `analyzer_version`·`period_type`별 재실행 도구 제공 |
-| 법·약관 | 2장 고지 준수; 목적·보관·인용 제한 |
+| 카카오 PC UI·리스트 클래스 변경 | `LIST_CONTROL_CLASS` 버전 태그; `kakao_clipboard_crawler`로 회귀 확인 |
+| 20방 순차 수집 지연 | 방당 타임아웃; 실패 방 스킵·`collect_runs` 로그 |
+| 소수 닉의 여론 과대 | `distinct_nicks`, `min_distinct_nicks`, `underrepresented` |
+| 분석 LLM 비용 | 방·버킷 단위 호출; `.env`에서 저가·고가 모델 분리 |
+| 컨텍스트 초과 | 서브 버킷 분할(2-stage) |
+| LLM 할루시네이션 | JSON 스키마 + Quote Resolver는 DB 원문만 HTML 삽입 |
+| 분석 누락 | idempotent 재실행; `analyzer_version`별 재분석 |
+| 법·약관 | 참여 방·목적·7일 원시 보관·로컬 리포트 접근 통제 |
 
 ---
 
@@ -291,11 +314,23 @@
 
 | 단계 | 내용 |
 |------|------|
-| **MVP** | 파일 기반 수집 덤프 → 단일 LLM 호출로 단순 요약 리포트(소량 붙여넣기), HTML 출력 |
-| **주기별 분석** | Periodic Analyzer + 인사이트 스토어 + 구조화 JSON 스키마 + 근거 인용 HTML |
-| **통계·시계열** | Aggregator + 추이 차트 + 이상치 탐지 + 업데이트 노트 대조 누적 |
-| **자동 스케줄** | UI 주기 설정·백그라운드 잡·과거 버킷 재분석 |
-| **운영 고도화** | 마스킹·커버리지 경고·여러 생성 모델 비교·다중 주기 혼용 운영 |
+| **0 PoC** | `kakao_clipboard_crawler.py` 단일 방 캡처 ✓ |
+| **1 수집** | 20+ 방, 10분 watch, 제목 정규화, diff, SQLite `messages`, 7일 purge |
+| **2 파싱** | captures 샘플 기반 파서, 이미지/이모티콘/삭제/봇 제외 |
+| **3 분석** | Periodic Analyzer, `.env` 모델, `distinct_nicks`, 인사이트 스토어 |
+| **4 통계** | 주제·태그 추이, 패치 반응, 갭만 (감성·이상치·방 비교 제외) |
+| **5 리포트** | Quote Resolver 원문 인용, HTML, 패치노트 대조 |
+| **6 스케줄** | collect / analyze / report CLI·작업 스케줄러 |
+| **7 운영** | `collect_runs` 관측, 커버리지 경고 |
+
+단계별 상세·통계 수식은 **`development-plan.md`** §7.
+
+## 10. 관련 문서
+
+| 문서 | 역할 |
+|------|------|
+| `design.md` (본 문서) | 아키텍처·스키마·운영 가정 정본 |
+| `development-plan.md` | 구현 단계, 파서, 통계 정의, `.env`, SQLite 개요 |
 
 ---
 
@@ -306,3 +341,4 @@
 | 0.1 | 2026-05-12 | 초안 작성(수집·RAG·HTML·스케줄·설정·리스크) |
 | 0.2 | 2026-05-12 | RAG 제거. 방·일자 단위 직접 분석(Daily Analyzer) + 인사이트 스토어 + 누적 통계(Aggregator) 구조로 재편. |
 | 0.3 | 2026-05-12 | "일일 분석" → "주기별 분석"으로 일반화. 분석 주기를 `hourly`/`daily`/`weekly`/cron 등 설정 가능하게 변경. 스키마에 `period_key`/`period_start`/`period_end`/`period_type` 도입, 통계 공통 그레인(`stats.common_grain`)·재분석 도구·다중 주기 혼용 운영 항목 추가. |
+| 0.4 | 2026-05-22 | 클립보드 Collector 확정(UIAutomation/OCR 제거). 20+ 방·10분 수집·SQLite·원시 7일·`.env` 모델. 통계를 주제·태그 추이·패치 반응만으로 축소. `distinct_nicks`·Quote Resolver·원문 HTML 인용. `development-plan.md` 추가. |

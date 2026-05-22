@@ -1,0 +1,100 @@
+# 카카오톡 PC 창 제목과 완전 일치해야 합니다 (끝의 "(N)" 안 읽음 수는 자동 제거 후 비교).
+# 실제 모니터링 방 제목으로 id/title/label 을 수정하세요.
+
+rooms:
+  - id: lineage-classic-main
+    title: "리니지 클래식 종합 커뮤니티 리니지클래식"
+    label: "리니클 종합"
+    enabled: true
+  - id: lineage-classic-trade
+    title: "리니지 클래식 거래방"
+    label: "리니클 거래"
+    enabled: true
+  - id: lineage-classic-pvp
+    title: "리니지 클래식 PVP 정보"
+    label: "리니클 PVP"
+    enabled: true
+  - id: lineage-classic-guild
+    title: "리니지 클래식 혈맹 모집"
+    label: "리니클 혈맹"
+    enabled: true
+  - id: lineage-classic-newbie
+    title: "리니지 클래식 초보 질문"
+    label: "리니클 초보"
+    enabled: true
+  - id: lineage-classic-boss
+    title: "리니지 클래식 보스/레이드"
+    label: "리니클 보스"
+    enabled: true
+  - id: lineage-classic-balance
+    title: "리니지 클래식 밸런스 토론"
+    label: "리니클 밸런스"
+    enabled: true
+  - id: lineage-classic-patch
+    title: "리니지 클래식 패치 후기"
+    label: "리니클 패치"
+    enabled: true
+  - id: lineage-classic-bug
+    title: "리니지 클래식 버그 제보"
+    label: "리니클 버그"
+    enabled: true
+  - id: lineage-classic-event
+    title: "리니지 클래식 이벤트"
+    label: "리니클 이벤트"
+    enabled: true
+  - id: lineage-classic-class-knight
+    title: "리니지 클래식 기사 클래스"
+    label: "리니클 기사"
+    enabled: true
+  - id: lineage-classic-class-mage
+    title: "리니지 클래식 마법사 클래스"
+    label: "리니클 마법"
+    enabled: true
+  - id: lineage-classic-class-archer
+    title: "리니지 클래식 궁수 클래스"
+    label: "리니클 궁수"
+    enabled: true
+  - id: lineage-classic-server-1
+    title: "리니지 클래식 1서버 잡담"
+    label: "1서버"
+    enabled: true
+  - id: lineage-classic-server-2
+    title: "리니지 클래식 2서버 잡담"
+    label: "2서버"
+    enabled: true
+  - id: lineage-classic-casual
+    title: "리니지 클래식 수다방"
+    label: "리니클 수다"
+    enabled: true
+  - id: lineage-classic-guide
+    title: "리니지 클래식 공략 공유"
+    label: "리니클 공략"
+    enabled: true
+  - id: lineage-classic-market
+    title: "리니지 클래식 아이템 시세"
+    label: "리니클 시세"
+    enabled: true
+  - id: lineage-classic-pet
+    title: "리니지 클래식 펫/탈것"
+    label: "리니클 펫"
+    enabled: true
+  - id: lineage-classic-dungeon
+    title: "리니지 클래식 던전 파티"
+    label: "리니클 던전"
+    enabled: true
+  - id: lineage-classic-pk
+    title: "리니지 클래식 PK 신고"
+    label: "리니클 PK"
+    enabled: true
+  - id: lineage-classic-offtopic
+    title: "리니지 클래식 OT 잡담"
+    label: "리니클 OT"
+    enabled: true
+
+exclude_nicks:
+  - "오픈채팅봇"
+
+exclude_body_patterns:
+  - "사진"
+  - "이모티콘"
+  - "삭제된 메시지"

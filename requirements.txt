@@ -1,0 +1,6 @@
+# Windows KakaoTalk clipboard collector (phase 1a-1b)
+pywin32>=306
+
+# Configuration
+python-dotenv>=1.0.0
+PyYAML>=6.0
