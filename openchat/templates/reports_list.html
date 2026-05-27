@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}리포트 — OpenChat{% endblock %}
+{% block content %}
+<h1>리포트 목록</h1>
+<p class="muted">프로젝트별 HTML 리포트 실행 기록</p>
+<div class="card">
+  {% if reports %}
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>프로젝트</th>
+        <th>생성 시각</th>
+        <th>범위</th>
+        <th>버킷</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in reports %}
+      <tr>
+        <td>{{ r.run_id }}</td>
+        <td><a href="/projects/{{ r.project_id }}">{{ r.project_id }}</a></td>
+        <td>{{ r.created_at }}</td>
+        <td>{{ r.window_label or "—" }}</td>
+        <td>{{ r.bucket_count }}</td>
+        <td><a class="btn" href="/reports/{{ r.run_id }}">보기</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">생성된 리포트가 없습니다. 프로젝트 상세에서 «리포트 생성»을 실행하세요.</p>
+  {% endif %}
+</div>
+{% endblock %}

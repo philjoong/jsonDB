@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+from typing import Any
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -11,7 +12,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from context.loader import load_context
-from openchat.config import AppSettings
+from openchat.config import AppSettings, effective_scope_days
 from report.charts import build_chart_scripts
 from report.payload import build_reporter_payload
 from report.quote_resolver import ResolvedQuote, resolve_quote
@@ -51,6 +52,53 @@ class ReportResult:
     scope_mode: str
     bucket_count: int
     reporter_backend: str
+    email_snapshot: dict[str, Any]
+
+
+def _build_email_snapshot(
+    *,
+    synthesis: ReportSynthesis,
+    narratives: list[dict[str, Any]],
+    topic_dicts: list[dict[str, Any]],
+    scope_label: str,
+    bucket_count: int,
+) -> dict[str, Any]:
+    topics_out: list[dict[str, Any]] = []
+    for t in narratives[:8]:
+        if not isinstance(t, dict):
+            continue
+        topics_out.append(
+            {
+                "tag": t.get("tag"),
+                "title": t.get("title") or t.get("topic_key"),
+                "topic_key": t.get("topic_key"),
+                "mentions": t.get("mentions"),
+                "distinct_nicks": t.get("distinct_nicks"),
+                "summary": t.get("summary") or t.get("narrative"),
+            }
+        )
+    if not topics_out:
+        ranked = sorted(
+            topic_dicts,
+            key=lambda r: (-int(r.get("mentions") or 0), -int(r.get("distinct_nicks") or 0)),
+        )
+        for r in ranked[:8]:
+            topics_out.append(
+                {
+                    "tag": r.get("tag"),
+                    "title": r.get("title") or r.get("topic_key"),
+                    "topic_key": r.get("topic_key"),
+                    "mentions": r.get("mentions"),
+                    "distinct_nicks": r.get("distinct_nicks"),
+                }
+            )
+    return {
+        "executive_summary": synthesis.executive_summary,
+        "highlights": list(synthesis.highlights[:6]),
+        "topics": topics_out,
+        "scope_label": scope_label,
+        "bucket_count": bucket_count,
+    }
 
 
 def _collect_insight_quote_refs(insight_rows: list[sqlite3.Row]) -> list[dict]:
@@ -219,7 +267,7 @@ def render_html_report(
 ) -> ReportResult:
     tz = ZoneInfo(settings.tz)
     now_dt = now.astimezone(tz) if now else datetime.now(tz)
-    window_days = _parse_window_days(settings.reporter_window)
+    window_days = effective_scope_days(settings)
 
     scope: ReportScope = resolve_report_scope(
         conn,
@@ -340,7 +388,11 @@ def render_html_report(
 
     min_dn = int(settings.min_distinct_nicks)
     scope_label = {
-        "window": f"최근 {settings.reporter_window} (전체 합산)",
+        "window": (
+            f"최근 {settings.data_scope.last_days}일 (message_at, 전체 합산)"
+            if settings.data_scope.mode == "last_days"
+            else f"최근 {settings.reporter_window} (전체 합산)"
+        ),
         "latest": f"최근 분석 {len(scope.buckets)}건",
         "period_keys": "지정 기간",
         "buckets": f"이번 analyze {len(scope.buckets)}건",
@@ -505,6 +557,13 @@ def render_html_report(
         stamp = now_dt.strftime("%Y%m%d_%H%M%S")
         output_path = settings.output_dir / f"report_{stamp}.html"
     output_path.write_text(html_doc, encoding="utf-8")
+    email_snapshot = _build_email_snapshot(
+        synthesis=synthesis,
+        narratives=narratives,
+        topic_dicts=topic_dicts,
+        scope_label=scope_label,
+        bucket_count=len(scope.buckets),
+    )
     return ReportResult(
         output_path=output_path,
         period_keys=period_keys_list,
@@ -512,4 +571,5 @@ def render_html_report(
         scope_mode=scope.mode,
         bucket_count=len(scope.buckets),
         reporter_backend=synthesis.backend,
+        email_snapshot=email_snapshot,
     )

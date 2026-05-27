@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}작업 {{ job.job_id[:8] }}… — OpenChat{% endblock %}
+{% block content %}
+<h1>백그라운드 작업</h1>
+<p class="muted">
+  프로젝트 <a href="/projects/{{ job.project_id }}">{{ job.project_id }}</a> ·
+  종류 <code>{{ job.kind }}</code> · 상태 <strong id="job-status">{{ job.status }}</strong>
+</p>
+
+<div class="card" id="job-card" data-job-id="{{ job.job_id }}" data-status="{{ job.status }}">
+  <p>생성: {{ job.created_at }}{% if job.started_at %} · 시작: {{ job.started_at }}{% endif %}
+     {% if job.finished_at %} · 완료: {{ job.finished_at }}{% endif %}</p>
+  {% if job.error %}
+  <div class="error">{{ job.error }}</div>
+  {% endif %}
+  {% if job.result and job.result.email %}
+  <p class="muted">이메일 발송이 완료되었습니다.</p>
+  {% endif %}
+  {% if job.result and job.result.run_id %}
+  <p><a class="btn btn-primary" href="/reports/{{ job.result.run_id }}">리포트 보기</a></p>
+  {% elif job.result and job.result.output_path %}
+  <p class="muted">출력: <code>{{ job.result.output_path }}</code></p>
+  {% endif %}
+  <h2>로그</h2>
+  <pre id="job-log" style="max-height:320px;overflow:auto;font-size:0.85rem">{{ job.log_text or "(없음)" }}</pre>
+</div>
+
+<div class="actions">
+  <a class="btn" href="/projects/{{ job.project_id }}">프로젝트로</a>
+  <a class="btn" href="/reports">리포트 목록</a>
+</div>
+
+{% if job.status == "pending" or job.status == "running" %}
+<script>
+(function () {
+  const card = document.getElementById("job-card");
+  const jobId = card.dataset.jobId;
+  const statusEl = document.getElementById("job-status");
+  const logEl = document.getElementById("job-log");
+  function poll() {
+    fetch("/api/jobs/" + jobId)
+      .then(r => r.json())
+      .then(data => {
+        statusEl.textContent = data.status;
+        card.dataset.status = data.status;
+        if (data.log_text) logEl.textContent = data.log_text;
+        if (data.error) {
+          let err = document.querySelector(".error");
+          if (!err) {
+            err = document.createElement("div");
+            err.className = "error";
+            card.insertBefore(err, card.querySelector("h2"));
+          }
+          err.textContent = data.error;
+        }
+        if (data.status === "succeeded" && data.result && data.result.run_id) {
+          if (!document.querySelector(".btn-primary")) {
+            const a = document.createElement("a");
+            a.className = "btn btn-primary";
+            a.href = "/reports/" + data.result.run_id;
+            a.textContent = "리포트 보기";
+            card.insertBefore(a, card.querySelector("h2"));
+          }
+        }
+        if (data.status === "pending" || data.status === "running") {
+          setTimeout(poll, 2000);
+        }
+      })
+      .catch(() => setTimeout(poll, 3000));
+  }
+  setTimeout(poll, 1500);
+})();
+</script>
+{% endif %}
+{% endblock %}

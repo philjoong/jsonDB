@@ -3,6 +3,8 @@
 본 문서는 `design.md`를 구현하기 위한 **단계·아키텍처·통계 정의**를 정리한다.  
 현재 동작 확인된 `kakao_clipboard_crawler.py`를 1차 Collector로 두고, SQLite·주기별 LLM 분석·HTML 리포트까지 촘촘한 단계로 확장한다.
 
+**웹 UI(Simple Service)** 운영은 [`docs/web-service-guide.md`](docs/web-service-guide.md) · [`simple-service-development-plan.md`](simple-service-development-plan.md)를 참고한다.
+
 **확정 운영 가정**
 
 | 항목 | 값 |

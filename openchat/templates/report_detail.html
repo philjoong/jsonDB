@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}리포트 #{{ run.run_id }} — OpenChat{% endblock %}
+{% block content %}
+<h1>리포트 #{{ run.run_id }}</h1>
+<p class="muted">
+  프로젝트 <a href="/projects/{{ run.project_id }}">{{ run.project_id }}</a> ·
+  {{ run.created_at }} · {{ run.window_label or "" }}
+</p>
+<div class="card">
+  <p>버킷 {{ run.bucket_count }}개 · Reporter: {{ run.reporter_backend or "—" }} · scope: {{ run.scope_mode or "—" }}</p>
+  <div class="actions">
+    <a class="btn btn-primary" href="/reports/{{ run.run_id }}/file" target="_blank" rel="noopener">새 탭에서 열기</a>
+    <form method="post" action="/reports/{{ run.run_id }}/email" style="display:inline">
+      <button type="submit" class="btn">이메일 발송</button>
+    </form>
+    <a class="btn" href="/reports">목록</a>
+  </div>
+</div>
+<div class="card" style="padding:0;overflow:hidden">
+  <iframe src="/reports/{{ run.run_id }}/file" title="리포트 미리보기"
+          style="width:100%;min-height:720px;border:0"></iframe>
+</div>
+{% endblock %}

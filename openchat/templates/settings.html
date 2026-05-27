@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}설정 — OpenChat{% endblock %}
+{% block content %}
+<h1>전역 설정</h1>
+<p class="muted">비밀값(API 키 등)은 <code>.env</code>에 두고, 운영 주기·데이터 범위는 <code>{{ config_path }}</code>에 저장됩니다.</p>
+
+{% if message == "1" %}
+<div class="card" style="background:#ecfdf5;border-color:#a7f3d0">
+  <p style="margin:0">설정을 저장했습니다. CLI·리포트 실행 시 <code>{{ config_path }}</code> 값이 반영됩니다.</p>
+</div>
+{% endif %}
+
+{% if error %}
+<div class="error">{{ error }}</div>
+{% endif %}
+
+<form method="post" action="/settings" class="card">
+  <h2>수집·분석·리포트 주기</h2>
+  <label for="collect_interval_minutes">수집 주기 (분)</label>
+  <input type="text" id="collect_interval_minutes" name="collect_interval_minutes"
+         value="{{ settings.collect_interval_minutes }}" required>
+
+  <label for="analyzer_period">분석 버킷 주기</label>
+  <input type="text" id="analyzer_period" name="analyzer_period"
+         value="{{ settings.analyzer_period }}" placeholder="1d, 12h" required>
+  <p class="muted">예: <code>1d</code>, <code>12h</code> — 버킷 분할에 사용됩니다.</p>
+
+  <label for="reporter_window">리포트 기본 윈도우</label>
+  <input type="text" id="reporter_window" name="reporter_window"
+         value="{{ settings.reporter_window }}" placeholder="7d" required>
+  <p class="muted">예: <code>7d</code> — 데이터 스코프가 <code>last_days</code>일 때는 아래 일수와 동기화됩니다.</p>
+
+  <h2 style="margin-top:1.5rem">데이터 스코프 (공유)</h2>
+  <p class="muted">리포트·통계·이메일이 동일하게 사용하는 최근 N일 범위 (<code>message_at</code> 기준).</p>
+
+  <label for="last_days">최근 N일</label>
+  <input type="text" id="last_days" name="last_days"
+         value="{{ settings.data_scope.last_days }}" required>
+
+  <label for="scope_tz">표시 시간대</label>
+  <input type="text" id="scope_tz" name="scope_tz"
+         value="{{ settings.data_scope.tz }}" placeholder="Asia/Seoul">
+
+  <input type="hidden" name="time_field" value="{{ settings.data_scope.time_field }}">
+  <input type="hidden" name="scope_mode" value="{{ settings.data_scope.mode }}">
+
+  <div class="actions">
+    <button type="submit" class="btn btn-primary">저장</button>
+    <a class="btn" href="/">대시보드</a>
+  </div>
+</form>
+
+<div class="card muted">
+  <p><strong>현재 스코프</strong>: mode={{ settings.data_scope.mode }},
+     last_days={{ settings.data_scope.last_days }},
+     time_field={{ settings.data_scope.time_field }}</p>
+</div>
+{% endblock %}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 import sys
 import time
@@ -20,6 +21,7 @@ from parser.kakao_clipboard import parse_kakao_clipboard_text
 
 from collector.clipboard import capture_visible_messages_from_hwnd, find_room_windows
 from collector.diff import extract_new_content
+from collector.title import normalize_title
 
 logger = logging.getLogger("openchat.collect")
 
@@ -29,6 +31,7 @@ class RoomCollectResult:
     room_id: str
     label: str
     status: str  # ok | skipped | error
+    canonical_title: str | None = None
     room_title: str | None = None
     new_line_count: int = 0
     new_message_count: int = 0
@@ -73,6 +76,18 @@ def _write_snapshot(state_dir: Path, room_id: str, text: str) -> None:
     _snapshot_path(state_dir, room_id).write_text(text, encoding="utf-8")
 
 
+def _slugify_for_path(text: str) -> str:
+    text = normalize_title(text)
+    text = re.sub(r"[^0-9A-Za-z가-힣\-_ ]+", "", text)
+    text = re.sub(r"\s+", "_", text).strip("_")
+    return text or "room"
+
+
+def _snapshot_key(project_id: str, canonical_title: str) -> str:
+    slug = _slugify_for_path(canonical_title)
+    return f"{project_id}__{slug}"
+
+
 def _write_capture_file(
     captures_dir: Path,
     room_id: str,
@@ -114,23 +129,26 @@ def collect_room(
     settings: AppSettings,
     conn: sqlite3.Connection | None = None,
     *,
+    canonical_title: str | None = None,
     save_full_capture: bool = True,
     save_diff: bool = True,
 ) -> RoomCollectResult:
     """Collect one room; update last snapshot; optionally write capture files."""
     room_started = datetime.now()
-    matches = find_room_windows(room.title)
+    canonical = (canonical_title or room.title or "").strip()
+    matches = find_room_windows(canonical)
     if not matches:
         logger.warning(
             "Room skipped (window not found): id=%s title=%r",
             room.id,
-            room.title,
+            canonical,
         )
         result = RoomCollectResult(
             room_id=room.id,
             label=room.label,
             status="skipped",
-            error=f"window not found: {room.title!r}",
+            canonical_title=canonical,
+            error=f"window not found: {canonical!r}",
         )
         if conn is not None:
             record_collect_run(
@@ -148,7 +166,7 @@ def collect_room(
         logger.warning(
             "Multiple windows for room id=%s title=%r; using first of %d",
             room.id,
-            room.title,
+            canonical,
             len(matches),
         )
 
@@ -163,13 +181,14 @@ def collect_room(
         logger.error(
             "Room capture failed: id=%s title=%r error=%s",
             room.id,
-            room.title,
+            canonical,
             exc,
         )
         result = RoomCollectResult(
             room_id=room.id,
             label=room.label,
             status="error",
+            canonical_title=canonical,
             room_title=window_title,
             error=str(exc),
         )
@@ -196,13 +215,16 @@ def collect_room(
             full_text,
             collected_at=collected_at,
         )
-    previous = _read_snapshot(settings.state_dir, room.id)
+    snapshot_id = room.id
+    if canonical and len(getattr(room, "titles", []) or []) > 1:
+        snapshot_id = _snapshot_key(room.id, canonical)
+    previous = _read_snapshot(settings.state_dir, snapshot_id)
     new_text, new_line_count = extract_new_content(previous, full_text)
     total_line_count = len(full_text.splitlines()) if full_text else 0
 
     header = {
         "room_id": room.id,
-        "canonical_title": room.title,
+        "canonical_title": canonical,
         "room_title": captured["room_title"],
         "room_hwnd": captured["room_hwnd"],
         "list_hwnd": captured["list_hwnd"],
@@ -216,7 +238,7 @@ def collect_room(
     if save_full_capture and full_text:
         capture_path = _write_capture_file(
             settings.captures_dir,
-            room.id,
+            snapshot_id,
             header,
             full_text,
             suffix="full",
@@ -224,14 +246,14 @@ def collect_room(
     if save_diff and new_text:
         diff_path = _write_capture_file(
             settings.captures_dir,
-            room.id,
+            snapshot_id,
             header,
             new_text,
             suffix="diff",
         )
 
     if full_text:
-        _write_snapshot(settings.state_dir, room.id, full_text)
+        _write_snapshot(settings.state_dir, snapshot_id, full_text)
 
     logger.info(
         "Room ok: id=%s title=%r new_lines=%d new_messages=%d total_lines=%d",
@@ -245,6 +267,7 @@ def collect_room(
         room_id=room.id,
         label=room.label,
         status="ok",
+        canonical_title=canonical,
         room_title=captured["room_title"],
         new_line_count=new_line_count,
         new_message_count=new_message_count,
@@ -283,14 +306,21 @@ def run_collect_cycle(
     sync_rooms(conn, target_rooms)
     try:
         for room in target_rooms:
-            result = collect_room(
-                room,
-                settings,
-                conn,
-                save_full_capture=save_captures,
-                save_diff=save_captures,
-            )
-            cycle.rooms.append(result)
+            titles = list(getattr(room, "titles", []) or [])
+            if not titles:
+                titles = [room.title]
+            for canonical_title in titles:
+                result = collect_room(
+                    room,
+                    settings,
+                    conn,
+                    canonical_title=canonical_title,
+                    save_full_capture=save_captures,
+                    save_diff=save_captures,
+                )
+                if len(titles) > 1:
+                    result.label = f"{room.label} / {canonical_title}"
+                cycle.rooms.append(result)
     finally:
         conn.close()
 

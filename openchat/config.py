@@ -1,4 +1,4 @@
-"""Load settings from .env and rooms.yaml."""
+"""Load settings from .env and rooms/projects YAML."""
 
 from __future__ import annotations
 
@@ -29,12 +29,83 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 @dataclass
-class RoomConfig:
+class ProjectConfig:
+    """
+    Project configuration.
+
+    Backward compatibility:
+    - Old schema uses a single `title`.
+    - New schema supports multiple `titles` for one project id.
+    """
+
     id: str
-    title: str
+    # Legacy schema uses a single title. Keep `title` as an init arg for tests/old code.
+    title: str = ""
+    # New schema supports multiple titles.
+    titles: list[str] = field(default_factory=list)
     label: str = ""
     enabled: bool = True
     update_notes_url: str = ""
+    email_sender: str = ""
+    email_receivers: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Normalize: ensure `titles` is always populated and `title` mirrors first.
+        norm_titles = [str(t).strip() for t in (self.titles or []) if str(t).strip()]
+        if not norm_titles and str(self.title or "").strip():
+            norm_titles = [str(self.title).strip()]
+        if not norm_titles:
+            raise ValueError("ProjectConfig requires title or titles")
+        self.titles = norm_titles
+        self.title = norm_titles[0]
+
+
+# Backward-compatible alias (existing code imports RoomConfig)
+RoomConfig = ProjectConfig
+
+
+@dataclass
+class DataScopeConfig:
+    """Shared message/report/stats window (persisted in ui_settings.yaml)."""
+
+    mode: str = "last_days"
+    last_days: int = 7
+    time_field: str = "message_at"
+    tz: str = "Asia/Seoul"
+
+
+def parse_project_email(item: dict[str, Any]) -> tuple[str, list[str]]:
+    """Parse sender/receivers from project YAML (nested ``email`` or flat keys)."""
+    block = item.get("email") if isinstance(item.get("email"), dict) else {}
+    sender = str(block.get("sender") or item.get("email_sender") or "").strip()
+    raw_receivers = block.get("receivers") or item.get("email_receivers") or []
+    if isinstance(raw_receivers, str):
+        raw_receivers = [line.strip() for line in raw_receivers.replace(",", "\n").splitlines()]
+    receivers = [str(r).strip() for r in raw_receivers if str(r).strip()]
+    return sender, receivers
+
+
+def parse_window_days(window: str) -> int:
+    """Parse reporter window strings like ``7d`` or plain day counts."""
+    w = (window or "").strip().lower()
+    if not w:
+        return 7
+    if w.endswith("d"):
+        try:
+            return max(1, int(w[:-1]))
+        except ValueError:
+            return 7
+    try:
+        return max(1, int(w))
+    except ValueError:
+        return 7
+
+
+def effective_scope_days(settings: AppSettings) -> int:
+    """Days used for report/stats when data_scope mode is last_days."""
+    if settings.data_scope.mode == "last_days":
+        return max(1, settings.data_scope.last_days)
+    return parse_window_days(settings.reporter_window)
 
 
 @dataclass
@@ -75,6 +146,8 @@ class AppSettings:
         "OpenChatInsightBot/1.0 (+https://github.com/open-chat)"
     )
     reporter_window: str = "7d"
+    ui_settings_config: Path = Path("config/ui_settings.yaml")
+    data_scope: DataScopeConfig = field(default_factory=DataScopeConfig)
     rooms_config: Path = Path("config/rooms.yaml")
     captures_dir: Path = Path("captures")
     state_dir: Path = Path("data/state")
@@ -86,6 +159,7 @@ class AppSettings:
     exclude_body_patterns: list[str] = field(default_factory=list)
     restore_clipboard: bool = True
     room_timeout_seconds: float = 30.0
+    email_api_base_url: str = ""
 
     @property
     def analyzer_model_label(self) -> str:
@@ -94,7 +168,7 @@ class AppSettings:
 
 
 def load_settings(env_path: Path | None = None) -> AppSettings:
-    """Load .env (if present) and rooms YAML into AppSettings."""
+    """Load .env (if present) and rooms/projects YAML into AppSettings."""
     if env_path:
         if not env_path.is_file():
             raise SystemExit(f".env file not found: {env_path}")
@@ -102,39 +176,66 @@ def load_settings(env_path: Path | None = None) -> AppSettings:
     else:
         load_dotenv()
 
-    rooms_path = Path(os.getenv("ROOMS_CONFIG", "config/rooms.yaml"))
+    # Config path priority:
+    # 1) explicit PROJECTS_CONFIG
+    # 2) explicit ROOMS_CONFIG
+    # 3) auto-detect: prefer config/projects.yaml if present, else config/rooms.yaml
+    projects_env = (os.getenv("PROJECTS_CONFIG") or "").strip()
+    rooms_env = (os.getenv("ROOMS_CONFIG") or "").strip()
+    if projects_env:
+        rooms_path = Path(projects_env)
+    elif rooms_env:
+        rooms_path = Path(rooms_env)
+    else:
+        projects_path = Path("config/projects.yaml")
+        rooms_path = projects_path if projects_path.is_file() else Path("config/rooms.yaml")
     if not rooms_path.is_file():
         raise SystemExit(
-            f"Rooms config not found: {rooms_path}. "
-            "Create config/rooms.yaml (see development-plan.md)."
+            f"Rooms/projects config not found: {rooms_path}. "
+            "Create config/projects.yaml (preferred) or config/rooms.yaml."
         )
 
     with rooms_path.open(encoding="utf-8") as fh:
         raw: dict[str, Any] = yaml.safe_load(fh) or {}
 
     rooms: list[RoomConfig] = []
-    for item in raw.get("rooms") or []:
+    items = raw.get("projects") or raw.get("rooms") or []
+    for item in items:
         if not item.get("enabled", True):
             continue
-        room_id = item.get("id")
-        title = item.get("title")
-        if not room_id or not title:
-            raise SystemExit(f"Each room needs id and title: {item!r}")
+        project_id = item.get("id")
+        titles = item.get("titles")
+        legacy_title = item.get("title")
+        if titles is None:
+            titles = [legacy_title] if legacy_title else []
+        if not project_id or not titles:
+            raise SystemExit(
+                "Each project needs id and titles (or legacy title): "
+                f"{item!r}"
+            )
+        norm_titles = [str(t).strip() for t in titles if str(t).strip()]
+        if not norm_titles:
+            raise SystemExit(f"Project titles cannot be empty: {item!r}")
+        email_sender, email_receivers = parse_project_email(item)
         rooms.append(
             RoomConfig(
-                id=str(room_id),
-                title=str(title),
-                label=str(item.get("label") or title),
+                id=str(project_id).strip(),
+                title=norm_titles[0],
+                titles=norm_titles,
+                label=str(item.get("label") or norm_titles[0]),
                 enabled=True,
                 update_notes_url=str(item.get("update_notes_url") or "").strip(),
+                email_sender=email_sender,
+                email_receivers=email_receivers,
             )
         )
 
     if not rooms:
         raise SystemExit(f"No enabled rooms in {rooms_path}")
 
-    return AppSettings(
-        tz=os.getenv("TZ", "Asia/Seoul"),
+    tz = os.getenv("TZ", "Asia/Seoul")
+    settings = AppSettings(
+        tz=tz,
         database_path=Path(os.getenv("DATABASE_PATH", "data/openchat.db")),
         retention_raw_days=_env_int("RETENTION_RAW_DAYS", 7),
         collect_interval_minutes=_env_int("COLLECT_INTERVAL_MINUTES", 10),
@@ -195,6 +296,11 @@ def load_settings(env_path: Path | None = None) -> AppSettings:
             )
         ).strip(),
         reporter_window=str(os.getenv("REPORTER_WINDOW", "7d")).strip() or "7d",
+        ui_settings_config=Path(
+            (os.getenv("UI_SETTINGS_CONFIG") or "config/ui_settings.yaml").strip()
+            or "config/ui_settings.yaml"
+        ),
+        data_scope=DataScopeConfig(tz=tz),
         rooms_config=rooms_path,
         captures_dir=Path(os.getenv("CAPTURES_DIR", "captures")),
         state_dir=Path(os.getenv("STATE_DIR", "data/state")),
@@ -206,4 +312,24 @@ def load_settings(env_path: Path | None = None) -> AppSettings:
         exclude_body_patterns=[str(x) for x in raw.get("exclude_body_patterns") or []],
         restore_clipboard=not _env_bool("NO_RESTORE_CLIPBOARD", False),
         room_timeout_seconds=float(os.getenv("ROOM_TIMEOUT_SECONDS", "30")),
+        email_api_base_url=str(os.getenv("EMAIL_API_BASE_URL", "")).strip().rstrip("/"),
     )
+    return _merge_ui_settings(settings)
+
+
+def _merge_ui_settings(settings: AppSettings) -> AppSettings:
+    """Apply config/ui_settings.yaml overrides (non-secret operational values)."""
+    from openchat.ui_settings_store import load_ui_settings
+
+    ui_path = settings.ui_settings_config
+    if not ui_path.is_file():
+        return settings
+
+    ui = load_ui_settings(ui_path, default_tz=settings.tz)
+    settings.collect_interval_minutes = ui.collect_interval_minutes
+    settings.analyzer_period = ui.analyzer_period
+    settings.reporter_window = ui.reporter_window
+    settings.data_scope = ui.data_scope
+    if not (settings.data_scope.tz or "").strip():
+        settings.data_scope.tz = settings.tz
+    return settings

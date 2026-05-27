@@ -69,15 +69,18 @@ def resolve_report_scope(
         return ReportScope(buckets=tuple(pairs), mode="period_keys")
 
     cutoff = now_dt.astimezone(ZoneInfo(tz)) - timedelta(days=window_days)
-    rows = conn.execute(
-        """
+    params: list[object] = [cutoff.isoformat(timespec="seconds")]
+    sql = """
         SELECT DISTINCT room_id, period_key
         FROM periodic_insights
         WHERE period_end >= ?
-        ORDER BY period_key ASC, room_id ASC
-        """,
-        (cutoff.isoformat(timespec="seconds"),),
-    ).fetchall()
+    """
+    if room_ids:
+        rph = ",".join(["?"] * len(room_ids))
+        sql += f" AND room_id IN ({rph})"
+        params.extend(room_ids)
+    sql += " ORDER BY period_key ASC, room_id ASC"
+    rows = conn.execute(sql, tuple(params)).fetchall()
     pairs = [InsightBucket(str(r["room_id"]), str(r["period_key"])) for r in rows]
     return ReportScope(buckets=tuple(pairs), mode="window")
 

@@ -1,0 +1,8 @@
+collect_interval_minutes: 10
+analyzer_period: 1d
+reporter_window: 7d
+data_scope:
+  mode: last_days
+  last_days: 7
+  time_field: message_at
+  tz: Asia/Seoul

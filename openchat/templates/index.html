@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}대시보드 — OpenChat{% endblock %}
+{% block content %}
+<h1>대시보드</h1>
+{% if settings_saved %}
+<p class="muted" style="color:#047857">설정이 저장되었습니다.</p>
+{% endif %}
+<p class="muted">프로젝트: <code>{{ config_path }}</code> · UI 설정: <code>{{ ui_config_path }}</code></p>
+<div class="card">
+  <h2>운영 요약</h2>
+  <p class="muted">수집 {{ ui_settings.collect_interval_minutes }}분 · 분석 {{ ui_settings.analyzer_period }} ·
+     데이터 스코프 최근 <strong>{{ ui_settings.data_scope.last_days }}</strong>일
+     (<a href="/settings">설정 변경</a>)</p>
+</div>
+<div class="card">
+  <p>프로젝트 <strong>{{ project_count }}</strong>개 (활성 {{ enabled_count }}개)</p>
+  <div class="actions">
+    <a class="btn btn-primary" href="/projects/new">프로젝트 추가</a>
+    <a class="btn" href="/projects">전체 목록</a>
+  </div>
+</div>
+<div class="card">
+  <h2>프로젝트 요약</h2>
+  {% if projects %}
+  <table>
+    <thead>
+      <tr><th>ID</th><th>라벨</th><th>창 제목</th><th>상태</th></tr>
+    </thead>
+    <tbody>
+      {% for p in projects %}
+      <tr>
+        <td><a href="/projects/{{ p.id }}">{{ p.id }}</a></td>
+        <td>{{ p.label }}</td>
+        <td>{{ p.titles | join(", ") }}</td>
+        <td>{% if p.enabled %}<span class="badge">활성</span>{% else %}<span class="badge badge-off">비활성</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">등록된 프로젝트가 없습니다.</p>
+  {% endif %}
+</div>
+{% endblock %}

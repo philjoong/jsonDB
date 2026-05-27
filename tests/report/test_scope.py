@@ -57,3 +57,31 @@ def test_resolve_latest_scope(tmp_path):
     assert scope.mode == "latest"
     assert len(scope.buckets) == 1
     assert scope.buckets[0].room_id == "r2"
+
+
+def test_resolve_window_scope_filters_room_ids(tmp_path):
+    conn = init_db(tmp_path / "t.db")
+    sync_rooms(
+        conn,
+        [
+            RoomConfig(id="r1", title="r1", label="r1", enabled=True),
+            RoomConfig(id="r2", title="r2", label="r2", enabled=True),
+        ],
+    )
+    upsert_periodic_insight(
+        conn,
+        _insight("r1", "2026-05-20", datetime(2026, 5, 20, 10, 0, 0, tzinfo=ZoneInfo(TZ))),
+    )
+    upsert_periodic_insight(
+        conn,
+        _insight("r2", "2026-05-21", datetime(2026, 5, 21, 10, 0, 0, tzinfo=ZoneInfo(TZ))),
+    )
+    scope = resolve_report_scope(
+        conn,
+        tz=TZ,
+        window_days=30,
+        now_dt=datetime(2026, 5, 26, 12, 0, 0, tzinfo=ZoneInfo(TZ)),
+        room_ids=["r1"],
+    )
+    assert scope.mode == "window"
+    assert all(b.room_id == "r1" for b in scope.buckets)

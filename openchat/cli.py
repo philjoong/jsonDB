@@ -310,6 +310,13 @@ def cmd_import_capture(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    from openchat.webapp import run_server
+
+    run_server(host=args.host, port=args.port)
+    return 0
+
+
 def cmd_pipeline(args: argparse.Namespace) -> int:
     """collect → analyze → aggregate → report (+ Reporter LLM) in one run."""
     settings = load_settings(Path(args.env) if args.env else None)
@@ -675,6 +682,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Report without Reporter LLM (static summary only)",
     )
     pipeline.set_defaults(func=cmd_pipeline)
+
+    serve = sub.add_parser(
+        "serve",
+        help="Run web UI (FastAPI) for project CRUD on 0.0.0.0",
+    )
+    serve.add_argument(
+        "--host",
+        default=None,
+        help="Bind host (default: SERVE_HOST or 0.0.0.0)",
+    )
+    serve.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Bind port (default: SERVE_PORT or 8000)",
+    )
+    serve.set_defaults(func=cmd_serve)
+
     return parser
 
 

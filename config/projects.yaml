@@ -1,0 +1,35 @@
+# 카카오톡 PC 창 제목과 완전 일치해야 합니다 (끝의 "(N)" 안 읽음 수는 자동 제거 후 비교).
+#
+# 프로젝트 1개가 여러 개의 채팅방 제목(title)을 묶어 운영할 수 있습니다.
+# - 기존 `config/rooms.yaml`(rooms[].title)도 계속 지원하지만,
+#   새 기능(복수 title)은 `projects.yaml` 사용을 권장합니다.
+
+projects:
+  # update_notes_url: 해당 경로 하위에 개별 패치/업데이트 글이 있는 목록·허브 페이지 URL (직접 패치 글 URL 아님)
+  - id: lineage-m
+    label: "리니지M"
+    enabled: true
+    titles:
+      - "리니지m방"
+    update_notes_url: "https://lineagem.plaync.com/board/update/list"
+  - id: aion2
+    label: "아이온2"
+    enabled: true
+    titles:
+      - "센터로드 아이온2"
+    update_notes_url: "https://aion2.plaync.com/ko-kr/board/update/list"
+  - id: lineage-classic
+    label: "리니지클래식"
+    enabled: true
+    titles:
+      - "리니지 클래식 이실로테 소통방"
+    update_notes_url: "https://lineageclassic.plaync.com/ko-kr/board/update/list"
+
+exclude_nicks:
+  - "오픈채팅봇"
+
+exclude_body_patterns:
+  - "사진"
+  - "이모티콘"
+  - "삭제된 메시지"
+

@@ -1,5 +1,8 @@
 # Simple Service 개발 계획 (웹 UI + 프로젝트/방 묶음 + 리포트/이메일)
 
+> **구현 상태 (MVP)**: 0~6단계 웹 기능 구현 완료.  
+> **운영 문서**: [`docs/web-service-guide.md`](docs/web-service-guide.md) · **빠른 시작**: [`README.md`](README.md)
+
 ## 목적
 
 현재 CLI 중심 파이프라인(수집 → 분석 → 통계 → HTML 리포트)을 **Windows PC(카카오톡 실행 동일 호스트)**에서 서비스 형태로 운영하기 위해, 아래를 제공하는 **내부망용(인증 없음) 웹 UI**를 추가한다.
@@ -20,14 +23,20 @@
 
 ---
 
-## 현행 구조 요약(기반 코드)
+## 현행 구조 요약(구현 반영)
 
-- 설정 로드: `openchat/config.py` 의 `load_settings()`가 `.env` + `config/rooms.yaml`를 읽어 `AppSettings.rooms` 구성
-- CLI 엔트리: `openchat/cli.py`
-  - collect: `collector.runner` 기반 수집
-  - analyze: `analyzer.periodic` 기반 주기별 분석 + `db.insights` upsert
-  - report: `report.render_html` (LLM 합성 + HTML 저장)
-- 이메일 발송: `email_sender.py`는 `test_api.py`의 Email API 형식(폼 인코딩)으로 **Outlook 호환 HTML**을 전송
+| 영역 | 경로·모듈 |
+|------|-----------|
+| 설정 | `load_settings()`: `.env` + `config/projects.yaml`(또는 `rooms.yaml`) + `config/ui_settings.yaml` 병합 |
+| 프로젝트 YAML CRUD | `openchat/projects_store.py` |
+| 웹 UI | `openchat/webapp.py` (`python -m openchat serve`) |
+| 수집/분석/리포트 실행 | `openchat/pipeline.py`, `openchat/job_service.py` |
+| 통계 (프로젝트·스코프) | `stats/project_stats.py` |
+| 이메일 | `report/openchat_email.py`, `openchat/email_delivery.py`, `email_sender.send_html_email` |
+| CLI | `openchat/cli.py` (기존 collect / analyze / report / pipeline 유지) |
+
+- DB: `data/openchat.db` — `background_jobs`, `report_runs` (웹 job·리포트 이력)
+- 리포트 출력: `reports/{project_id}/report_*.html`
 
 ---
 
@@ -243,72 +252,50 @@ data_scope:
 
 ## 구현 단계(권장 순서)
 
-### 0단계: 준비/정리
+### 0단계: 준비/정리 — 완료
 
-- `.gitignore`에 `venv/`, `__pycache__/`, `.pytest_cache/`, `data/openchat.db`, `reports/` 등 운영 산출물 누락 여부 확인
-- 기존 CLI가 정상 동작하는지 스모크 테스트(collect/analyze/report)
+- `.gitignore` 운영 산출물 포함
+- CLI·웹 공통 설정 로드 경로 정리
 
-### 1단계: 설정 스키마 확장(프로젝트 + titles)
+### 1단계: 설정 스키마 확장(프로젝트 + titles) — 완료
 
-- `config/rooms.yaml` → `config/projects.yaml`로 새 파일을 도입하거나, 기존 파일을 확장
-- `openchat/config.py`
-  - `RoomConfig`를 `ProjectConfig` 개념으로 확장
-  - 기존 코드와의 호환(구 스키마도 읽되 변환) 고려
-- 수집기에서 “창 제목(title) → project_id” 매핑 로직 추가
+- `config/projects.yaml` + `ProjectConfig` / `titles[]`
+- `collector/runner.py`: 프로젝트별 복수 title 수집
+- 구 `rooms.yaml` 호환
 
-완료 기준:
-- 프로젝트 1개가 복수 title을 갖고, 해당 title로 열린 창을 모두 수집 대상으로 인식
+### 2단계: 웹 서버 골격 + 프로젝트 CRUD — 완료
 
-### 2단계: 웹 서버 골격 + 프로젝트 CRUD
+- `openchat/webapp.py`, Jinja2 템플릿
+- `projects_store.atomic_write_yaml`, `/api/projects`, 설정 reload
 
-- FastAPI 앱 추가(예: `openchat/webapp.py`)
-- 템플릿/Jinja2(또는 최소한의 SPA)로 프로젝트 CRUD 구현
-- YAML 저장 시 atomic write(임시 파일 → rename)
+### 3단계: 전역/프로젝트 설정 UI — 완료
 
-완료 기준:
-- 웹에서 프로젝트 생성/수정/삭제, titles 편집 가능
-- 서버 재시작 없이 설정 re-load 가능
+- `/settings`, `config/ui_settings.yaml`
+- `data_scope.last_days` → 리포트·이메일·통계 공유 (`effective_scope_days`)
 
-### 3단계: 전역/프로젝트 설정 UI
+### 4단계: 실행 버튼(수집/분석/리포트) — 완료
 
-- 수집 주기/분석 주기/리포트 윈도우 등을 UI에서 조정
-- 저장 위치:
-  - 전역은 `.env`를 직접 수정하기보다 **별도 `config/ui_settings.yaml`** 또는 DB 테이블 권장
-  - `.env`는 “비밀값(API KEY, EMAIL_API_BASE_URL)” 보관에 유지
+- 프로젝트 상세 실행 버튼, `background_jobs`, `/reports`, `/jobs/{id}`
 
-완료 기준:
-- UI에서 주기 값을 바꾸고, 이후 실행이 변경값을 반영
-  - (추가) UI에서 “최근 N일 스코프”를 바꾸면, 통계 화면과 리포트 생성/이메일 발송 모두가 같은 범위를 사용
+### 5단계: 이메일 — 완료
 
-### 4단계: 실행 버튼(수집/분석/리포트)
+- 프로젝트 `email.sender` / `receivers`, `report/openchat_email.py`
+- 리포트+이메일, 리포트별 발송, `email_snapshot_json`
 
-- 프로젝트 상세에서 실행:
-  - collect 1회
-  - analyze(해당 프로젝트 스코프)
-  - report 생성(해당 프로젝트 스코프)
-- 장시간 작업은 job으로 분리
+### 6단계: 통계 웹 조회 — 완료 (1차: 표)
 
-완료 기준:
-- 웹에서 클릭으로 리포트 HTML이 생성되고 목록에 표시
+- `/stats/projects/{id}`, `GET /api/projects/{id}/stats`
+- `periodic_insights` 즉석 집계 + `message_at` 일별 표
+- **후속**: Chart.js 웹 재사용 (2차)
 
-### 5단계: 이메일(프로젝트별 sender/receivers, Outlook HTML)
+---
 
-- UI에서 프로젝트별 sender/receivers 설정 저장
-- `email_sender.py` 스타일을 참고해, “오픈채팅 리포트 이메일 HTML” 템플릿 신규 작성
-- `EMAIL_API_BASE_URL`은 `.env` 고정, sender/receivers만 웹에서 입력
+## 후속 개선(선택)
 
-완료 기준:
-- 특정 프로젝트 리포트를 생성하고, 같은 화면에서 이메일 발송까지 성공
-
-### 6단계: 통계 웹 조회
-
-- `stats.aggregator` 결과를 프로젝트 스코프로 재사용하여 API로 노출
-- 차트는:
-  - 1차: 단순 표/리스트(상위 N)
-  - 2차: `report/charts.py`의 스크립트를 웹 페이지에서도 재사용(가능하면)
-
-완료 기준:
-- 프로젝트 통계 페이지에서 최근 window 기준 집계가 확인 가능
+- 통계 페이지 차트 (`report/charts.py` 연동)
+- Windows 서비스·작업 스케줄러 등록 가이드
+- 리포트/DB 보관 자동 purge
+- 웹 인증(필요 시)
 
 ---
 
@@ -339,12 +326,15 @@ data_scope:
 
 ## 테스트 계획(최소)
 
-- 단위 테스트
-  - 프로젝트 titles 매핑/정규화 테스트
-  - YAML read/write(atomic) 테스트
-  - 통계 API가 프로젝트 스코프를 제대로 적용하는지 테스트
-- 통합 테스트
-  - 웹에서 프로젝트 생성 → collect → analyze → report → email 전 과정을 1회 수행
-- 회귀
-  - 기존 CLI(`openchat collect/analyze/report`)가 동일하게 동작하는지 확인
+자동화 (`pytest`):
+
+- `tests/openchat/` — 설정, projects_store, webapp, pipeline, email
+- `tests/stats/test_project_stats.py` — 스코프·집계
+- `tests/report/test_scope.py` — 리포트 버킷 필터
+
+수동 스모크 (웹):
+
+1. 프로젝트 생성 → 수집 → 분석(job) → 리포트 → 통계 → (선택) 이메일
+
+회귀: CLI `collect` / `analyze` / `report` / `pipeline` 동작 확인
 

@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}{{ stats.project_label }} 통계 — OpenChat{% endblock %}
+{% block content %}
+<h1>{{ stats.project_label }} 통계</h1>
+<p class="muted">
+  프로젝트 <code>{{ stats.project_id }}</code> ·
+  범위: <strong>{{ stats.window.label }}</strong>
+  ({{ stats.window.window_start_iso[:10] }} ~ {{ stats.window.window_end_iso[:10] }})
+  · <a href="/settings">스코프 변경</a>
+</p>
+
+<div class="card">
+  <h2>요약</h2>
+  <table>
+    <tbody>
+      <tr><th>메시지 수</th><td>{{ stats.message_count }}</td></tr>
+      <tr><th>참여 닉 (distinct)</th><td>{{ stats.distinct_nicks }}</td></tr>
+      <tr><th>분석 버킷</th><td>{{ stats.insight_bucket_count }} (기간 {{ stats.period_keys | length }}개)</td></tr>
+    </tbody>
+  </table>
+  <div class="actions">
+    <a class="btn" href="/projects/{{ stats.project_id }}">프로젝트</a>
+    <a class="btn btn-primary" href="/projects/{{ stats.project_id }}">실행 · 리포트</a>
+  </div>
+</div>
+
+{% if stats.messages_by_day %}
+<div class="card">
+  <h2>일별 메시지 (message_at)</h2>
+  <table>
+    <thead><tr><th>날짜</th><th>메시지</th><th>참여 닉</th></tr></thead>
+    <tbody>
+      {% for row in stats.messages_by_day %}
+      <tr>
+        <td>{{ row.day }}</td>
+        <td>{{ row.messages }}</td>
+        <td>{{ row.distinct_nicks }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>상위 주제 (periodic_insights 집계)</h2>
+  {% if stats.top_topics %}
+  <table>
+    <thead>
+      <tr><th>태그</th><th>주제</th><th>언급</th><th>참여 닉</th></tr>
+    </thead>
+    <tbody>
+      {% for t in stats.top_topics %}
+      <tr>
+        <td>{{ t.tag or "—" }}</td>
+        <td>{{ t.title or t.topic_key or "—" }}</td>
+        <td>{{ t.mentions }}</td>
+        <td>{{ t.distinct_nicks }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">표시할 주제가 없습니다. analyze 실행 후 다시 확인하세요.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>패치 반응 상위</h2>
+  {% if stats.top_patches %}
+  <table>
+    <thead>
+      <tr><th>패치 항목</th><th>성향</th><th>언급</th><th>참여 닉</th><th>요약</th></tr>
+    </thead>
+    <tbody>
+      {% for p in stats.top_patches %}
+      <tr>
+        <td>{{ p.patch_item }}</td>
+        <td>{{ p.stance }}</td>
+        <td>{{ p.mentions }}</td>
+        <td>{{ p.distinct_nicks }}</td>
+        <td>{{ p.summary or "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">패치 반응 데이터가 없습니다.</p>
+  {% endif %}
+</div>
+
+{% if stats.insight_message_by_period %}
+<div class="card">
+  <h2>버킷별 메시지 수 (분석 입력)</h2>
+  <table>
+    <thead><tr><th>period_key</th><th>message_count</th></tr></thead>
+    <tbody>
+      {% for row in stats.insight_message_by_period %}
+      <tr>
+        <td>{{ row.period_key }}</td>
+        <td>{{ row.message_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}
