@@ -12,6 +12,7 @@ ENV/
 # Local environment and secrets
 .env
 .env.*
+!.env.example
 *.local
 
 # Tooling caches
@@ -32,9 +33,12 @@ dist/
 # Kakao crawler output
 captures/
 data/state/
+data/*.db
 
 # OS and editor noise
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+
+reports/

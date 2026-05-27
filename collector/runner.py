@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from db.collect_runs import record_collect_run
+from db.connection import init_db
+from db.messages import insert_messages, sync_rooms
 from openchat.config import AppSettings, RoomConfig
+from parser.kakao_clipboard import parse_kakao_clipboard_text
 
 from collector.clipboard import capture_visible_messages_from_hwnd, find_room_windows
 from collector.diff import extract_new_content
@@ -25,6 +31,7 @@ class RoomCollectResult:
     status: str  # ok | skipped | error
     room_title: str | None = None
     new_line_count: int = 0
+    new_message_count: int = 0
     total_line_count: int = 0
     capture_path: Path | None = None
     diff_path: Path | None = None
@@ -84,14 +91,34 @@ def _write_capture_file(
     return path
 
 
+def _persist_messages(
+    conn: sqlite3.Connection,
+    room: RoomConfig,
+    settings: AppSettings,
+    full_text: str,
+    *,
+    collected_at: datetime,
+) -> int:
+    parsed = parse_kakao_clipboard_text(
+        full_text,
+        room.id,
+        tz=settings.tz,
+        exclude_nicks=settings.exclude_nicks,
+        exclude_body_patterns=settings.exclude_body_patterns,
+    )
+    return insert_messages(conn, room.id, parsed, collected_at=collected_at)
+
+
 def collect_room(
     room: RoomConfig,
     settings: AppSettings,
+    conn: sqlite3.Connection | None = None,
     *,
     save_full_capture: bool = True,
     save_diff: bool = True,
 ) -> RoomCollectResult:
     """Collect one room; update last snapshot; optionally write capture files."""
+    room_started = datetime.now()
     matches = find_room_windows(room.title)
     if not matches:
         logger.warning(
@@ -99,12 +126,23 @@ def collect_room(
             room.id,
             room.title,
         )
-        return RoomCollectResult(
+        result = RoomCollectResult(
             room_id=room.id,
             label=room.label,
             status="skipped",
             error=f"window not found: {room.title!r}",
         )
+        if conn is not None:
+            record_collect_run(
+                conn,
+                started_at=room_started,
+                finished_at=datetime.now(),
+                room_id=room.id,
+                status=result.status,
+                new_message_count=0,
+                error=result.error,
+            )
+        return result
 
     if len(matches) > 1:
         logger.warning(
@@ -128,15 +166,36 @@ def collect_room(
             room.title,
             exc,
         )
-        return RoomCollectResult(
+        result = RoomCollectResult(
             room_id=room.id,
             label=room.label,
             status="error",
             room_title=window_title,
             error=str(exc),
         )
+        if conn is not None:
+            record_collect_run(
+                conn,
+                started_at=room_started,
+                finished_at=datetime.now(),
+                room_id=room.id,
+                status=result.status,
+                new_message_count=0,
+                error=result.error,
+            )
+        return result
 
     full_text: str = captured["text"]
+    collected_at = datetime.now(ZoneInfo(settings.tz))
+    new_message_count = 0
+    if conn is not None and full_text.strip():
+        new_message_count = _persist_messages(
+            conn,
+            room,
+            settings,
+            full_text,
+            collected_at=collected_at,
+        )
     previous = _read_snapshot(settings.state_dir, room.id)
     new_text, new_line_count = extract_new_content(previous, full_text)
     total_line_count = len(full_text.splitlines()) if full_text else 0
@@ -175,22 +234,34 @@ def collect_room(
         _write_snapshot(settings.state_dir, room.id, full_text)
 
     logger.info(
-        "Room ok: id=%s title=%r new_lines=%d total_lines=%d",
+        "Room ok: id=%s title=%r new_lines=%d new_messages=%d total_lines=%d",
         room.id,
         captured["room_title"],
         new_line_count,
+        new_message_count,
         total_line_count,
     )
-    return RoomCollectResult(
+    result = RoomCollectResult(
         room_id=room.id,
         label=room.label,
         status="ok",
         room_title=captured["room_title"],
         new_line_count=new_line_count,
+        new_message_count=new_message_count,
         total_line_count=total_line_count,
         capture_path=capture_path,
         diff_path=diff_path,
     )
+    if conn is not None:
+        record_collect_run(
+            conn,
+            started_at=room_started,
+            finished_at=datetime.now(),
+            room_id=room.id,
+            status=result.status,
+            new_message_count=new_message_count,
+        )
+    return result
 
 
 def run_collect_cycle(
@@ -208,14 +279,20 @@ def run_collect_cycle(
         settings.collect_interval_minutes,
     )
 
-    for room in target_rooms:
-        result = collect_room(
-            room,
-            settings,
-            save_full_capture=save_captures,
-            save_diff=save_captures,
-        )
-        cycle.rooms.append(result)
+    conn = init_db(settings.database_path)
+    sync_rooms(conn, target_rooms)
+    try:
+        for room in target_rooms:
+            result = collect_room(
+                room,
+                settings,
+                conn,
+                save_full_capture=save_captures,
+                save_diff=save_captures,
+            )
+            cycle.rooms.append(result)
+    finally:
+        conn.close()
 
     cycle.finished_at = datetime.now()
     elapsed = (cycle.finished_at - cycle.started_at).total_seconds()
@@ -265,6 +342,7 @@ def print_cycle_summary(cycle: CollectCycleResult, file: Any = None) -> None:
         if room.status == "ok":
             print(
                 f"  [OK] {room.room_id} ({room.label}): "
+                f"+{room.new_message_count} msgs / "
                 f"+{room.new_line_count} lines / {room.total_line_count} total",
                 file=out,
             )

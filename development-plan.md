@@ -13,7 +13,8 @@
 | 채팅방 상태 | PC 카카오톡에서 **항상 열어둔 상태** (닫힌/미발견 방은 해당 사이클 스킵) |
 | 원시 텍스트 보관 | **7일** (`retention.raw_days=7`) |
 | 저장소 | 처음부터 **SQLite** 단일 DB |
-| LLM 모델 | **`.env`** 로 분석·리포트 프로바이더·모델·API 키 결정 |
+| Analyzer LLM | **EXAONE 3.5 7.8B Instruct** + GGUF **4-bit `Q4_K_M`** ([HF](https://huggingface.co/LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF)), Ollama 등 OpenAI 호환 API |
+| Reporter LLM | **`.env`** 의 `REPORTER_*` 로 프로바이더·모델·API 키 결정 |
 | 수집 방식 | 클립보드 Ctrl+A/C (`EVA_VH_ListControl_Dblclk`) — UIAutomation/OCR **미사용** |
 
 ---
@@ -119,10 +120,10 @@ flowchart LR
 | **Diff / Dedup** | 방별 `last_snapshot` 또는 DB `content_hash`로 신규 메시지만 insert |
 | **Parser** | §2.1 규칙, 제외 패턴 필터 |
 | **Bucketizer** | `analyzer.period` 기준 `period_key` 부여 |
-| **Periodic Analyzer** | 버킷별 원시 메시지 + 패치노트 컨텍스트 → JSON 인사이트 |
+| **Periodic Analyzer** | 버킷별 원시 메시지 + 패치노트 컨텍스트 → JSON 인사이트 (**EXAONE 3.5 7.8B Instruct**) |
 | **Aggregator** | 인사이트 누적 → **태그·주제 빈도 추이**, **패치 반응 누적**만 |
 | **Quote Resolver** | 리포트 생성 시 `quote_search_keys` 또는 `message_id`로 `messages` **원문 LIKE/정확 검색** → HTML에 원문 삽입 |
-| **Model router** | `.env`의 `ANALYZER_*`, `REPORTER_*` 읽어 API/CLI 호출 |
+| **Model router** | `.env`의 `ANALYZER_*`(기본 EXAONE 3.5 7.8B), `REPORTER_*` 읽어 API/CLI 호출 |
 
 ---
 
@@ -251,28 +252,56 @@ RETENTION_RAW_DAYS=7
 # 수집
 COLLECT_INTERVAL_MINUTES=10
 MIN_DISTINCT_NICKS=3
+ROOMS_CONFIG=config/rooms.yaml
+CAPTURES_DIR=captures
+STATE_DIR=data/state
+# NO_RESTORE_CLIPBOARD=true
+# ROOM_TIMEOUT_SECONDS=30
 
-# 분석
+# 분석 (Periodic Analyzer) — EXAONE 3.5 7.8B Instruct, GGUF 4-bit Q4_K_M (확정)
+# https://huggingface.co/LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF
+# 파일: EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf (~5GB VRAM)
+# Ollama: ollama run hf.co/LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF
 ANALYZER_PROVIDER=openai
-ANALYZER_MODEL=gpt-4o-mini
-ANALYZER_API_KEY=
+OPENAI_API_BASE=http://localhost:11434/v1
+ANALYZER_MODEL=EXAONE-3.5-7.8B-Instruct
+ANALYZER_QUANTIZATION=Q4_K_M
+ANALYZER_GGUF_REPO=LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF
+ANALYZER_API_KEY=ollama
 ANALYZER_PERIOD=1d
 ANALYZER_PROMPT_VERSION=v1
 
 # 리포트 합성
 REPORTER_PROVIDER=openai
-REPORTER_MODEL=gpt-4o
+REPORTER_MODEL=gpt-5.2
 REPORTER_API_KEY=
+REPORTER_OPENAI_API_BASE=https://api.openai.com/v1
 REPORTER_WINDOW=7d
 
 # 경로
 PATCHNOTES_PATH=docs/patchnotes.md
 ROADMAP_PATH=docs/roadmap.md
-ROOMS_CONFIG=config/rooms.yaml
 OUTPUT_DIR=reports
 ```
 
 애플리케이션은 시작 시 `.env` 로드 → 설정 객체에 매핑. 키 누락 시 명확한 오류 메시지.
+
+### 6.1 Periodic Analyzer LLM (확정)
+
+주기별 분석(`python -m openchat analyze`)은 **EXAONE 3.5 7.8B Instruct**만 사용한다.
+
+| 항목 | 값 |
+|------|-----|
+| 모델 | [LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct](https://huggingface.co/LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct) |
+| GGUF (로컬) | [EXAONE-3.5-7.8B-Instruct-GGUF](https://huggingface.co/LGAI-EXAONE/EXAONE-3.5-7.8B-Instruct-GGUF) |
+| 양자화 (확정) | **4-bit `Q4_K_M`** — `ANALYZER_QUANTIZATION=Q4_K_M`, 파일 `EXAONE-3.5-7.8B-Instruct-Q4_K_M.gguf` (~5GB VRAM) |
+| 컨텍스트 | 32,768 토큰 (긴 일간 버킷·2-stage 분할 전 1차 입력에 활용) |
+| 호출 방식 | Ollama 등 **OpenAI 호환** `chat/completions` (`ANALYZER_PROVIDER=openai` + `OPENAI_API_BASE`) 또는 동등 로컬 런타임 |
+| 출력 | `design.md` §5.3.4 고정 JSON 스키마; `analyzer_model` 컬럼·메타에 `EXAONE-3.5-7.8B-Instruct@Q4_K_M` (`settings.analyzer_model_label`) |
+
+리포트 합성(`REPORTER_*`)은 Analyzer와 분리하며, Reporter 모델은 본 문서에서 고정하지 않는다.
+
+> **구현 상태**: `openchat analyze`는 기본적으로 Ollama 등 OpenAI 호환 API로 EXAONE을 호출한다. `--heuristic` 또는 `ANALYZER_USE_LLM=false`로 휴리스틱만 사용 가능.
 
 ---
 
@@ -281,18 +310,19 @@ OUTPUT_DIR=reports
 | 단계 | ID | 산출물 | 완료 기준 |
 |------|-----|--------|-----------|
 | **0** | PoC | `kakao_clipboard_crawler.py` | 단일 방 캡처·`captures/` 저장 ✓ (완료) |
-| **1a** | 다중 방 수집 | Collector 확장 | `rooms.yaml` 20+ 방, 제목 정규화, 순차 캡처, 방별 diff |
-| **1b** | Watch 모드 | `collect --watch` | 10분 주기 루프, 실패 방 로그, 클립보드 복원 |
-| **2a** | SQLite | `db/schema.sql`, migration | `messages` insert, `content_hash` 중복 무시 |
-| **2b** | Parser | `parser/kakao_clipboard.py` | 샘플 captures 회귀 테스트, 제외 패턴 적용 |
-| **2c** | Retention | `jobs/purge_raw.py` | 7일 초과 `messages` 삭제 |
-| **3a** | Bucketizer | `analyzer/bucketizer.py` | `period_key` 부여, 미분석 버킷 큐 |
-| **3b** | Analyzer | `analyzer/periodic.py` + `.env` | JSON 스키마 출력, `topics`·`patch_reactions`·`distinct_nicks` |
-| **3c** | Idempotent | analyzer_version | 동일 `(room_id, period_key, version)` 재실행 시 덮어쓰기 |
-| **4a** | Aggregator | `stats/aggregator.py` | `topic_stats`, `patch_reaction_stats`만 갱신 |
-| **4b** | Quote resolver | `report/quote_resolver.py` | message_id·search_phrase → 원문 조회 |
-| **5a** | HTML 리포트 | `report/render_html.py` | 주제·태그 추이, 패치 반응, 원문 인용 섹션 |
-| **5b** | Context | `context/loader.py` | 패치노트·로드맵 파일 주입 |
+| **1a** | 다중 방 수집 | `collector/runner.py` | `config/rooms.yaml` 기반 다중 방 순차 캡처, 제목 정규화, 방별 diff ✓ (완료) |
+| **1b** | Watch 모드 | `python -m openchat collect --watch` | 10분 주기 루프, 실패 방 스킵, 클립보드 복원 ✓ (완료) |
+| **2a** | SQLite | `db/schema.sql`, `db/connection.py`, `db/messages.py` | `messages` insert, `content_hash` 중복 무시 ✓ (완료) |
+| **2b** | Parser | `parser/kakao_clipboard.py` | 샘플 캡처 회귀 테스트, 제외 패턴 적용 ✓ (완료) |
+| **2c** | Retention | `jobs/purge_raw.py`, `python -m openchat purge` | 7일 초과 `messages` 삭제 ✓ (완료) |
+| **3a** | Bucketizer | `analyzer/bucketizer.py`, `python -m openchat bucketize` | `period_key` 부여, 미분석 버킷 큐 ✓ (완료) |
+| **3b** | Analyzer | `analyzer/periodic.py`, `db/insights.py`, `python -m openchat analyze` | `periodic_insights` 적재, `topics`·`distinct_nicks` 생성 ✓ (완료; LLM은 **EXAONE 3.5 7.8B** 연동 예정) |
+| **3d** | Analyzer LLM | `analyzer/llm.py`, `analyzer/prompts.py`, `analyzer/periodic.py` | EXAONE 3.5 7.8B Instruct로 버킷 JSON 분석, heuristic 폴백 ✓ (완료) |
+| **3c** | Idempotent | `db/insights.py`, `python -m openchat analyze --force` | 동일 `(room_id, period_key, version)` 재실행 시 upsert 덮어쓰기 ✓ (완료) |
+| **4a** | Aggregator | `stats/aggregator.py`, `python -m openchat aggregate` | `topic_stats`, `patch_reaction_stats` 갱신 ✓ (완료) |
+| **4b** | Quote resolver | `report/quote_resolver.py` | message_id·search_phrase → 원문 조회 ✓ (완료) |
+| **5a** | HTML 리포트 | `report/render_html.py`, `python -m openchat report` | 주제·태그 추이, 패치 반응, 원문 인용 섹션 ✓ (완료) |
+| **5b** | Context | `context/loader.py` | 패치노트·로드맵 파일 주입 ✓ (완료) |
 | **6** | 스케줄 | CLI/cron | `collect`, `analyze`, `report` 서브커맨드, Windows 작업 스케줄러 연동 문서 |
 | **7** | 운영 | 문서·관측 | `collect_runs` 대시보드(텍스트 로그), 커버리지 낮음 방 알림 |
 
@@ -306,8 +336,9 @@ OUTPUT_DIR=reports
 |------|---------|
 | 단일 `--room` | `rooms.yaml` 전체 순회 |
 | `find_room_window` 1건 | `find_room_windows(normalize_title)` |
-| `captures/kakao_capture_*.txt` | DB `messages` + 선택적 디버그 덤프 |
-| 1회 실행 | `python -m openchat collect --watch` |
+| `captures/kakao_capture_*.txt` | 파싱 후 DB `messages` 적재 + 선택적 캡처 파일(`captures/{room_id}/...`) |
+| 1회 실행 | `python -m openchat collect` |
+| 10분 주기 실행 | `python -m openchat collect --watch` |
 | 파일 타임스탬프 dedup 없음 | `content_hash` + overlap diff |
 
 핵심 로직(`post_key_ex`, `LIST_CONTROL_CLASS`, `normalize_kakao_text`)은 `collector/clipboard.py`로 이동하고 크롤러 CLI는 얇은 래퍼로 유지 가능.
@@ -322,6 +353,7 @@ rooms:
     title: "리니지 클래식 종합 커뮤니티 리니지클래식"
     label: "리니클 종합"
     enabled: true
+    update_notes_url: "https://example.com/game/news/"  # 하위에 패치 글 목록
   # ... 20개 이상
 exclude_nicks:
   - "오픈채팅봇"
@@ -341,6 +373,7 @@ exclude_body_patterns:
 | 스크롤 밖 과거 메시지 미수집 | 리포트에 coverage 표기; 중요 이슈는 운영자가 방 스크롤 유지 |
 | 제목 `(N)` 변동 | `normalize_title` |
 | LLM `mentions` 과대 | `distinct_nicks`·`min_distinct_nicks`·정렬 키 |
+| EXAONE 로컬 VRAM 부족 | Q4_K_M·방당 2-stage 분할; 실패 시 heuristic 폴백 |
 | 인용 오류 | Quote Resolver는 DB 원문만 |
 
 ---
@@ -358,3 +391,10 @@ exclude_body_patterns:
 | 버전 | 날짜 | 요약 |
 |------|------|------|
 | 1.0 | 2026-05-22 | 초안: 운영 가정 반영, 통계 범위 축소, SQLite·.env·단계별 로드맵, captures 샘플 기반 파서 |
+| 1.1 | 2026-05-26 | 1a~2c 구현 반영: 다중 방 수집/Watch/SQLite 적재/파서/Retention/CLI(`purge`) 완료 표시, `.env` 키 추가 |
+| 1.2 | 2026-05-26 | 3a~3c 구현 반영: Bucketizer/Analyzer/Idempotent upsert, CLI(`bucketize`, `analyze`, `analyze --force`) 추가, `periodic_insights` 적재 시작 |
+| 1.3 | 2026-05-26 | 4a~5b 구현 반영: Aggregator/Quote Resolver/Context/HTML report, CLI(`aggregate`, `report`) 추가 |
+| 1.4 | 2026-05-26 | Periodic Analyzer LLM 확정: EXAONE 3.5 7.8B Instruct, §6.1·`.env` 예시·로드맵 3d 추가 |
+| 1.5 | 2026-05-26 | Analyzer GGUF 양자화 확정: 4-bit Q4_K_M, `ANALYZER_QUANTIZATION`·`.env.example`·`config.py` 정렬 |
+| 1.6 | 2026-05-26 | 3d 구현: `analyzer/llm.py`·프롬프트·EXAONE OpenAI 호환 호출, heuristic 폴백, `guide.md` Ollama 설치 안내 |
+| 1.7 | 2026-05-26 | Reporter LLM: `report/synthesize.py`·`reporter_prompts.py`·Chart.js 차트, `REPORTER_*` 설정, 정적 폴백 |
