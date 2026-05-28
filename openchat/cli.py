@@ -18,7 +18,6 @@ from jobs.purge_raw import purge_raw_messages
 from openchat.config import AppSettings, load_settings
 from analyzer.bucketizer import bucketize_diagnostics, print_bucketize_summary
 from analyzer.periodic import analyze_bucket
-from context.loader import load_context
 from stats.aggregator import aggregate_stats
 from report.render_html import ReportResult, render_html_report
 
@@ -91,10 +90,6 @@ def _run_analyze_phase(
     top_n: int,
 ) -> tuple[int, object, list[tuple[str, str]]]:
     """Analyze queued buckets; return (count, diagnostics, processed (room_id, period_key))."""
-    context = load_context(
-        patchnotes_path=settings.patchnotes_path,
-        roadmap_path=settings.roadmap_path,
-    )
     room_labels = {r.id: r.label for r in settings.rooms}
     diag = bucketize_diagnostics(
         conn,
@@ -112,7 +107,6 @@ def _run_analyze_phase(
             conn,
             b,
             settings,
-            context=context,
             room_label=room_labels.get(b.room_id, b.room_id),
             force_heuristic=heuristic,
             top_n=top_n,
@@ -245,13 +239,13 @@ def _print_report_success(res: ReportResult, settings: AppSettings) -> None:
     if settings.reporter_use_llm and (settings.reporter_api_key or "").strip():
         if res.reporter_backend == "llm":
             print(
-                "  AI report: 요약·차트(Chart.js)·주제/패치 합성 섹션 포함 — "
-                "브라우저에서 상단 '요약' 확인"
+                "  AI report: 요약/차트(Chart.js)/주제/패치 합성 섹션 포함"
+                " - 브라우저에서 상단 요약 확인"
             )
         else:
             print(
-                "  AI report: Reporter API 실패 또는 비활성 — "
-                "정적 요약만 포함 (로그 확인)"
+                "  AI report: Reporter API 실패 또는 비활성"
+                " - 정적 요약만 포함 (로그 확인)"
             )
 
 

@@ -10,9 +10,10 @@ import hashlib
 import logging
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from analyzer.bucketizer import Bucket
@@ -23,14 +24,53 @@ from analyzer.prompts import (
     format_message_block,
     prompt_fingerprint,
 )
-from context.loader import ContextBundle
 from openchat.config import AppSettings
 
 logger = logging.getLogger(__name__)
 
 _VALID_TAGS = frozenset({"bug", "balance", "event", "ops", "meta", "general"})
-_VALID_STANCES = frozenset({"negative", "neutral", "positive", "mixed"})
 _VALID_COVERAGE = frozenset({"high", "partial", "low"})
+
+# Override legacy token/stopword definitions with readable Korean-safe rules.
+_WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+_STOPWORDS = {
+    "지금",
+    "근데",
+    "일단",
+    "그럼",
+    "그리고",
+    "그런데",
+    "그래서",
+    "진짜",
+    "그냥",
+    "오늘",
+    "내일",
+    "어제",
+    "이번",
+    "저번",
+}
+_DISCOURSE_ONLY = {
+    "지금",
+    "근데",
+    "일단",
+    "그럼",
+    "그리고",
+    "그래서",
+    "그러면",
+    "아니",
+    "음",
+    "어",
+}
+_SUBJECTLESS_VERB_ENDINGS = (
+    "합니다",
+    "했습니다",
+    "됩니다",
+    "됐습니다",
+    "나갔습니다",
+    "갑니다",
+    "왔습니다",
+    "감사합니다",
+)
 
 _WORD_RE = re.compile(r"[0-9A-Za-z가-힣_]{2,}")
 
@@ -46,6 +86,19 @@ _STOPWORDS = {
     "ㅋㅋ",
     "ㅎㅎ",
 }
+
+
+def _looks_like_noise_topic(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return True
+    if t in _DISCOURSE_ONLY:
+        return True
+    if t.endswith(_SUBJECTLESS_VERB_ENDINGS):
+        return True
+    if len(t) <= 2 and t in {"네", "음", "어"}:
+        return True
+    return False
 
 @dataclass(frozen=True)
 class AnalyzedInsight:
@@ -135,6 +188,28 @@ def _truncate_transcript(
     return merged, note
 
 
+def _split_transcript_chunks(
+    rows: list[dict[str, Any]],
+    *,
+    max_chars: int,
+) -> list[list[dict[str, Any]]]:
+    chunks: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    size = 0
+    for r in rows:
+        line = f"{r['message_id']}\t{r['nick']}\t{r['message_at']}\t{r['body']}\n"
+        line_len = len(line)
+        if current and size + line_len > max_chars:
+            chunks.append(current)
+            current = []
+            size = 0
+        current.append(r)
+        size += line_len
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _normalize_quote_refs(raw: Any, *, room_id: str) -> list[dict]:
     if not isinstance(raw, list):
         return []
@@ -154,20 +229,110 @@ def _normalize_quote_refs(raw: Any, *, room_id: str) -> list[dict]:
     return out
 
 
+def _normalize_message_ids(raw: Any, *, limit: int = 30) -> list[int]:
+    if not isinstance(raw, list):
+        return []
+    out: list[int] = []
+    seen: set[int] = set()
+    for value in raw:
+        try:
+            mid = int(value)
+        except (TypeError, ValueError):
+            continue
+        if mid in seen:
+            continue
+        out.append(mid)
+        seen.add(mid)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _normalize_contexts(raw: Any) -> list[dict]:
+    if not isinstance(raw, list):
+        return []
+    contexts: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    for idx, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            continue
+        message_ids = _normalize_message_ids(item.get("message_ids"))
+        if not message_ids:
+            for key in ("first_message_id", "last_message_id"):
+                if item.get(key) is not None:
+                    message_ids.extend(_normalize_message_ids([item.get(key)], limit=1))
+        if not message_ids:
+            continue
+        context_id = str(item.get("context_id") or f"ctx_{idx}").strip()[:80]
+        if not context_id:
+            context_id = f"ctx_{idx}"
+        base_id = context_id
+        suffix = 2
+        while context_id in used_ids:
+            context_id = f"{base_id}_{suffix}"
+            suffix += 1
+        used_ids.add(context_id)
+
+        first_ids = _normalize_message_ids([item.get("first_message_id")], limit=1)
+        last_ids = _normalize_message_ids([item.get("last_message_id")], limit=1)
+        context: dict[str, Any] = {
+            "context_id": context_id,
+            "message_ids": message_ids,
+            "first_message_id": first_ids[0] if first_ids else message_ids[0],
+            "last_message_id": last_ids[0] if last_ids else message_ids[-1],
+        }
+        label = str(item.get("label") or "").strip()
+        if label:
+            context["label"] = label[:120]
+        summary = str(item.get("summary") or "").strip()
+        if summary:
+            context["summary"] = summary[:500]
+        nicks = item.get("nicks")
+        if isinstance(nicks, list):
+            clean_nicks = [str(n).strip() for n in nicks if str(n).strip()]
+            if clean_nicks:
+                context["nicks"] = clean_nicks[:12]
+        contexts.append(context)
+    return contexts[:20]
+
+
+def _normalize_context_ids(raw: Any, known_ids: set[str]) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in raw:
+        cid = str(value).strip()
+        if not cid or cid in seen:
+            continue
+        if known_ids and cid not in known_ids:
+            continue
+        out.append(cid)
+        seen.add(cid)
+        if len(out) >= 5:
+            break
+    return out
+
+
 def _normalize_topics(
     raw: Any,
     *,
     room_id: str,
     min_distinct_nicks: int,
+    contexts_by_id: dict[str, dict] | None = None,
 ) -> list[dict]:
     if not isinstance(raw, list):
         return []
+    contexts_by_id = contexts_by_id or {}
+    known_context_ids = set(contexts_by_id)
     topics: list[dict] = []
     for item in raw:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()
         if not title:
+            continue
+        if _looks_like_noise_topic(title):
             continue
         tag = str(item.get("tag") or "general").strip().lower()
         if tag not in _VALID_TAGS:
@@ -193,35 +358,12 @@ def _normalize_topics(
         refs = _normalize_quote_refs(item.get("quote_refs"), room_id=room_id)
         if refs:
             topic["quote_refs"] = refs
+        context_ids = _normalize_context_ids(item.get("context_ids"), known_context_ids)
+        if context_ids:
+            topic["context_ids"] = context_ids
+            topic["contexts"] = [contexts_by_id[cid] for cid in context_ids]
         topics.append(topic)
     return topics
-
-
-def _normalize_patch_reactions(raw: Any, *, room_id: str) -> list[dict]:
-    if not isinstance(raw, list):
-        return []
-    out: list[dict] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        patch_item = str(item.get("patch_item") or "").strip()
-        if not patch_item:
-            continue
-        stance = str(item.get("stance") or "neutral").strip().lower()
-        if stance not in _VALID_STANCES:
-            stance = "neutral"
-        pr: dict[str, Any] = {
-            "patch_item": patch_item,
-            "stance": stance,
-            "mentions": max(0, int(item.get("mentions") or 0)),
-            "distinct_nicks": max(0, int(item.get("distinct_nicks") or 0)),
-            "summary": str(item.get("summary") or "").strip(),
-        }
-        refs = _normalize_quote_refs(item.get("quote_refs"), room_id=room_id)
-        if refs:
-            pr["quote_refs"] = refs
-        out.append(pr)
-    return out
 
 
 def normalize_llm_payload(
@@ -230,7 +372,7 @@ def normalize_llm_payload(
     bucket: Bucket,
     message_count: int,
     min_distinct_nicks: int,
-) -> tuple[str | None, list[dict], list[dict]]:
+) -> tuple[str | None, list[dict]]:
     coverage = data.get("coverage")
     if coverage is not None:
         cov = str(coverage).strip().lower()
@@ -238,16 +380,140 @@ def normalize_llm_payload(
     else:
         coverage_out = None
 
+    contexts = _normalize_contexts(data.get("conversation_contexts"))
+    contexts_by_id = {
+        str(ctx["context_id"]): ctx
+        for ctx in contexts
+        if isinstance(ctx, dict) and ctx.get("context_id")
+    }
     topics = _normalize_topics(
         data.get("topics"),
         room_id=bucket.room_id,
         min_distinct_nicks=min_distinct_nicks,
+        contexts_by_id=contexts_by_id,
     )
-    patches = _normalize_patch_reactions(
-        data.get("patch_reactions"),
-        room_id=bucket.room_id,
+    return coverage_out, topics
+
+
+def _topic_merge_key(topic: dict[str, Any]) -> tuple[str, str]:
+    tag = str(topic.get("tag") or "general").strip().lower()
+    text = str(topic.get("topic_key") or topic.get("title") or "").strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    return tag, text
+
+
+def _merge_llm_topics(
+    topic_lists: list[list[dict]],
+    *,
+    min_distinct_nicks: int,
+    top_n: int = 12,
+) -> list[dict]:
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for topics in topic_lists:
+        for t in topics:
+            key = _topic_merge_key(t)
+            if not key[1]:
+                continue
+            agg = merged.get(key)
+            if agg is None:
+                agg = dict(t)
+                agg["mentions"] = 0
+                agg["distinct_nicks"] = 0
+                agg["quote_refs"] = []
+                merged[key] = agg
+            agg["mentions"] += max(0, int(t.get("mentions") or 0))
+            agg["distinct_nicks"] += max(0, int(t.get("distinct_nicks") or 0))
+            if not agg.get("summary") and t.get("summary"):
+                agg["summary"] = str(t["summary"])
+            context_ids = t.get("context_ids")
+            if isinstance(context_ids, list):
+                agg_ids = agg.setdefault("context_ids", [])
+                for cid in context_ids:
+                    cid = str(cid)
+                    if cid and cid not in agg_ids:
+                        agg_ids.append(cid)
+                agg["context_ids"] = agg_ids[:5]
+            contexts = t.get("contexts")
+            if isinstance(contexts, list):
+                agg_contexts = agg.setdefault("contexts", [])
+                seen_contexts = {
+                    str(ctx.get("context_id"))
+                    for ctx in agg_contexts
+                    if isinstance(ctx, dict) and ctx.get("context_id")
+                }
+                for ctx in contexts:
+                    if not isinstance(ctx, dict):
+                        continue
+                    cid = str(ctx.get("context_id") or "")
+                    if not cid or cid in seen_contexts:
+                        continue
+                    agg_contexts.append(ctx)
+                    seen_contexts.add(cid)
+                agg["contexts"] = agg_contexts[:5]
+            refs = t.get("quote_refs")
+            if isinstance(refs, list):
+                seen = {
+                    tuple(sorted(ref.items()))
+                    for ref in agg.get("quote_refs", [])
+                    if isinstance(ref, dict)
+                }
+                for ref in refs:
+                    if not isinstance(ref, dict):
+                        continue
+                    marker = tuple(sorted(ref.items()))
+                    if marker not in seen:
+                        agg["quote_refs"].append(ref)
+                        seen.add(marker)
+            agg["quote_refs"] = agg["quote_refs"][:3]
+
+    out = sorted(
+        merged.values(),
+        key=lambda t: (-int(t.get("distinct_nicks") or 0), -int(t.get("mentions") or 0)),
+    )[:top_n]
+    for t in out:
+        t["underrepresented"] = int(t.get("distinct_nicks") or 0) < min_distinct_nicks
+        if not t.get("quote_refs"):
+            t.pop("quote_refs", None)
+    return out
+
+
+def _call_analyzer_llm(
+    client: Any,
+    *,
+    bucket: Bucket,
+    settings: AppSettings,
+    room_label: str,
+    rows: list[dict[str, Any]],
+    note: str | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    system = build_system_prompt(
+        min_distinct_nicks=settings.min_distinct_nicks,
+        prompt_version=settings.analyzer_prompt_version,
     )
-    return coverage_out, topics, patches
+    block = format_message_block(rows)
+    user = build_user_prompt(
+        bucket,
+        room_label=room_label,
+        messages_block=block,
+        message_count=len(rows),
+        truncated_note=note,
+    )
+    started = time.perf_counter()
+    data = chat_completion_json(
+        client,
+        model=settings.analyzer_model,
+        system=system,
+        user=user,
+        temperature=settings.analyzer_temperature,
+        timeout_seconds=min(settings.analyzer_timeout_seconds, 180.0),
+    )
+    elapsed = time.perf_counter() - started
+    return data, {
+        "sent_messages": len(rows),
+        "sent_chars": len(block),
+        "prompt_chars": len(system) + len(user),
+        "elapsed": elapsed,
+    }
 
 
 def analyze_bucket_llm(
@@ -255,9 +521,9 @@ def analyze_bucket_llm(
     bucket: Bucket,
     settings: AppSettings,
     *,
-    context: ContextBundle | None = None,
     room_label: str | None = None,
     client: Any | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> AnalyzedInsight:
     """Analyze a bucket with EXAONE (OpenAI-compatible chat/completions)."""
     rows = fetch_bucket_messages(conn, bucket)
@@ -282,25 +548,8 @@ def analyze_bucket_llm(
             analyzer_backend="llm",
         )
 
-    ctx = context or ContextBundle(patchnotes="", roadmap="")
     label = room_label or bucket.room_id
-    trimmed, trunc_note = _truncate_transcript(
-        rows,
-        max_chars=settings.analyzer_max_transcript_chars,
-    )
-    system = build_system_prompt(
-        min_distinct_nicks=settings.min_distinct_nicks,
-        prompt_version=settings.analyzer_prompt_version,
-    )
-    user = build_user_prompt(
-        bucket,
-        room_label=label,
-        messages_block=format_message_block(trimmed),
-        message_count=message_count,
-        patchnotes=ctx.patchnotes,
-        roadmap=ctx.roadmap,
-        truncated_note=trunc_note,
-    )
+    max_transcript_chars = min(settings.analyzer_max_transcript_chars, 8_000)
 
     own_client = client is None
     if own_client:
@@ -310,21 +559,107 @@ def analyze_bucket_llm(
         )
 
     assert client is not None
-    data = chat_completion_json(
-        client,
-        model=settings.analyzer_model,
-        system=system,
-        user=user,
-        temperature=settings.analyzer_temperature,
-        timeout_seconds=settings.analyzer_timeout_seconds,
-    )
+    raw_chars = len(format_message_block(rows))
+    chunk_topic_lists: list[list[dict]] = []
+    metrics: list[dict[str, Any]] = []
+    coverage_values: list[str] = []
+    empty_chunks: list[int] = []
+    try:
+        if raw_chars > max_transcript_chars:
+            chunks = _split_transcript_chunks(rows, max_chars=max_transcript_chars)
+            for idx, chunk in enumerate(chunks, start=1):
+                note = (
+                    f"large bucket chunk {idx}/{len(chunks)}; "
+                    f"analyze only the provided chat lines in this chunk"
+                )
+                chunk_chars = len(format_message_block(chunk))
+                if progress:
+                    progress(
+                        f"analyze bucket {bucket.period_key} chunk {idx}/{len(chunks)} "
+                        f"messages={len(chunk)} chars={chunk_chars}"
+                    )
+                data, metric = _call_analyzer_llm(
+                    client,
+                    bucket=bucket,
+                    settings=settings,
+                    room_label=label,
+                    rows=chunk,
+                    note=note,
+                )
+                coverage, chunk_topics = normalize_llm_payload(
+                    data,
+                    bucket=bucket,
+                    message_count=len(chunk),
+                    min_distinct_nicks=settings.min_distinct_nicks,
+                )
+                if coverage:
+                    coverage_values.append(coverage)
+                chunk_topic_lists.append(chunk_topics)
+                metrics.append(metric)
+                if not chunk_topics:
+                    empty_chunks.append(idx)
+                if progress:
+                    progress(
+                        f"analyze bucket {bucket.period_key} chunk {idx}/{len(chunks)} "
+                        f"finished topics={len(chunk_topics)} elapsed={metric['elapsed']:.1f}s"
+                    )
+            topics = _merge_llm_topics(
+                chunk_topic_lists,
+                min_distinct_nicks=settings.min_distinct_nicks,
+                top_n=12,
+            )
+            coverage = "partial" if "partial" in coverage_values else (
+                coverage_values[0] if coverage_values else None
+            )
+        else:
+            if progress:
+                progress(
+                    f"analyze bucket {bucket.period_key} single chunk "
+                    f"messages={len(rows)} chars={raw_chars}"
+                )
+            data, metric = _call_analyzer_llm(
+                client,
+                bucket=bucket,
+                settings=settings,
+                room_label=label,
+                rows=rows,
+                note=None,
+            )
+            metrics.append(metric)
+            coverage, topics = normalize_llm_payload(
+                data,
+                bucket=bucket,
+                message_count=message_count,
+                min_distinct_nicks=settings.min_distinct_nicks,
+            )
+            if progress:
+                progress(
+                    f"analyze bucket {bucket.period_key} single chunk "
+                    f"finished topics={len(topics)} elapsed={metric['elapsed']:.1f}s"
+                )
+    except AnalyzerLLMError as exc:
+        sent_messages = sum(int(m["sent_messages"]) for m in metrics)
+        sent_chars = sum(int(m["sent_chars"]) for m in metrics)
+        elapsed = sum(float(m["elapsed"]) for m in metrics)
+        empty_note = f", empty_chunks={empty_chunks}" if empty_chunks else ""
+        raise AnalyzerLLMError(
+            f"{exc} (bucket={bucket.room_id} {bucket.period_key}, "
+            f"messages={message_count}, sent_messages={sent_messages}, "
+            f"sent_chars={sent_chars}, chunks={len(metrics)}{empty_note}, "
+            f"elapsed={elapsed:.1f}s)"
+        ) from exc
 
-    coverage, topics, patches = normalize_llm_payload(
-        data,
-        bucket=bucket,
-        message_count=message_count,
-        min_distinct_nicks=settings.min_distinct_nicks,
-    )
+    if message_count > 0 and not topics:
+        sent_messages = sum(int(m["sent_messages"]) for m in metrics)
+        sent_chars = sum(int(m["sent_chars"]) for m in metrics)
+        elapsed = sum(float(m["elapsed"]) for m in metrics)
+        empty_note = f", empty_chunks={empty_chunks}" if empty_chunks else ""
+        raise AnalyzerLLMError(
+            f"LLM returned no topics for {bucket.room_id} {bucket.period_key} "
+            f"with {message_count} messages "
+            f"(sent_messages={sent_messages}, sent_chars={sent_chars}, "
+            f"chunks={len(metrics)}{empty_note}, elapsed={elapsed:.1f}s)"
+        )
 
     ph = prompt_fingerprint(
         bucket=bucket,
@@ -332,13 +667,13 @@ def analyze_bucket_llm(
         prompt_version=settings.analyzer_prompt_version,
         min_distinct_nicks=settings.min_distinct_nicks,
         message_count=message_count,
-        truncated=trunc_note is not None,
+        truncated=raw_chars > max_transcript_chars,
     )
     return AnalyzedInsight(
         message_count=message_count,
         coverage=coverage,
         topics=topics,
-        patch_reactions=patches,
+        patch_reactions=[],
         prompt_hash=ph,
         analyzer_backend="llm",
     )
@@ -349,14 +684,12 @@ def analyze_bucket(
     bucket: Bucket,
     settings: AppSettings,
     *,
-    context: ContextBundle | None = None,
     room_label: str | None = None,
     force_heuristic: bool = False,
     top_n: int = 12,
+    progress: Callable[[str], None] | None = None,
 ) -> AnalyzedInsight:
-    """
-    Run LLM analysis when enabled; on failure optionally fall back to heuristic.
-    """
+    """Run LLM analysis when enabled; on failure optionally fall back to heuristic."""
     use_llm = (
         settings.analyzer_use_llm
         and not force_heuristic
@@ -377,8 +710,8 @@ def analyze_bucket(
             conn,
             bucket,
             settings,
-            context=context,
             room_label=room_label,
+            progress=progress,
         )
     except AnalyzerLLMError as exc:
         if not settings.analyzer_fallback_heuristic:
@@ -429,10 +762,7 @@ def analyze_bucket_heuristic(
     analyzer_model: str = "heuristic",
     analyzer_version: str = "v1",
 ) -> AnalyzedInsight:
-    """
-    Produce `topics` and `patch_reactions` for a bucket (no external LLM).
-    topics[] fields: tag, title, mentions, distinct_nicks (plus topic_key).
-    """
+    """Produce `topics` for a bucket (no external LLM)."""
     if isinstance(tz, str):
         tz = ZoneInfo(tz)
 
@@ -490,6 +820,8 @@ def analyze_bucket_heuristic(
 
     topics: list[dict] = []
     for term, mentions in ranked:
+        if _looks_like_noise_topic(term):
+            continue
         nicks = term_nicks.get(term, set())
         topics.append(
             {

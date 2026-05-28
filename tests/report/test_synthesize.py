@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from openchat.config import AppSettings
-from report.payload import ReporterPayload
+from report.payload import ReporterPayload, _compact_topics
 from report.reporter_llm import ReporterLLMError
 from report.synthesize import normalize_synthesis, static_synthesis, synthesize_report
 
@@ -50,6 +50,32 @@ def test_static_synthesis_without_key():
     syn = synthesize_report(payload, settings)
     assert syn.backend == "static"
     assert "주제A" in syn.executive_summary or any("주제A" in h for h in syn.highlights)
+
+
+def test_compact_topics_preserves_contexts_for_reporter():
+    topics = _compact_topics(
+        [
+            {
+                "tag": "balance",
+                "title": "raid balance",
+                "topic_key": "raid_balance",
+                "mentions": 4,
+                "distinct_nicks": 3,
+                "context_ids": ["ctx_1"],
+                "contexts": [
+                    {
+                        "context_id": "ctx_1",
+                        "label": "raid replies",
+                        "summary": "A question led to several balance replies.",
+                        "message_ids": [1, 2, 3],
+                        "nicks": ["a", "b", "c"],
+                    }
+                ],
+            }
+        ]
+    )
+    assert topics[0]["context_ids"] == ["ctx_1"]
+    assert topics[0]["contexts"][0]["summary"].startswith("A question")
 
 
 def test_synthesize_llm_with_mock(monkeypatch):

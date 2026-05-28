@@ -10,7 +10,12 @@ from typing import Any
 
 import yaml
 
-from openchat.config import ProjectConfig, parse_project_email
+from openchat.config import (
+    ProjectConfig,
+    normalize_analyze_send_time,
+    normalize_report_send_time,
+    parse_project_email,
+)
 
 
 def resolve_projects_config_path() -> Path:
@@ -67,6 +72,8 @@ def _item_to_project(item: dict[str, Any]) -> ProjectConfig:
         label=str(item.get("label") or (norm_titles[0] if norm_titles else "")),
         enabled=bool(item.get("enabled", True)),
         update_notes_url=str(item.get("update_notes_url") or "").strip(),
+        report_send_time=normalize_report_send_time(item.get("report_send_time")),
+        analyze_send_time=normalize_analyze_send_time(item.get("analyze_send_time")),
         email_sender=email_sender,
         email_receivers=email_receivers,
     )
@@ -82,6 +89,10 @@ def _project_to_item(project: ProjectConfig) -> dict[str, Any]:
     url = (project.update_notes_url or "").strip()
     if url:
         item["update_notes_url"] = url
+    if project.report_send_time:
+        item["report_send_time"] = project.report_send_time
+    if project.analyze_send_time:
+        item["analyze_send_time"] = project.analyze_send_time
     if project.email_sender or project.email_receivers:
         item["email"] = {
             "sender": project.email_sender,
@@ -173,6 +184,8 @@ class ProjectsStore:
         update_notes_url: str = "",
         email_sender: str = "",
         email_receivers: list[str] | None = None,
+        report_send_time: str = "",
+        analyze_send_time: str = "",
     ) -> ProjectConfig:
         project_id = project_id.strip()
         if not project_id:
@@ -185,6 +198,8 @@ class ProjectsStore:
             label=label.strip() or (titles[0] if titles else project_id),
             enabled=enabled,
             update_notes_url=update_notes_url.strip(),
+            report_send_time=normalize_report_send_time(report_send_time),
+            analyze_send_time=normalize_analyze_send_time(analyze_send_time),
             email_sender=email_sender.strip(),
             email_receivers=list(email_receivers or []),
         )
@@ -202,6 +217,8 @@ class ProjectsStore:
         update_notes_url: str | None = None,
         email_sender: str | None = None,
         email_receivers: list[str] | None = None,
+        report_send_time: str | None = None,
+        analyze_send_time: str | None = None,
     ) -> ProjectConfig:
         project = self.get_project(project_id)
         if project is None:
@@ -219,6 +236,10 @@ class ProjectsStore:
             project.enabled = enabled
         if update_notes_url is not None:
             project.update_notes_url = update_notes_url.strip()
+        if report_send_time is not None:
+            project.report_send_time = normalize_report_send_time(report_send_time)
+        if analyze_send_time is not None:
+            project.analyze_send_time = normalize_analyze_send_time(analyze_send_time)
         if email_sender is not None:
             project.email_sender = email_sender.strip()
         if email_receivers is not None:
@@ -245,6 +266,8 @@ class ProjectsStore:
             "titles": list(project.titles),
             "title": project.title,
             "update_notes_url": project.update_notes_url,
+            "report_send_time": project.report_send_time,
+            "analyze_send_time": project.analyze_send_time,
             "email_sender": project.email_sender,
             "email_receivers": list(project.email_receivers),
         }

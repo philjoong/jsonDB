@@ -42,6 +42,9 @@ Rules:
   The HTML report embeds resolved quotes under each topic card; you do not write quote text.
 - Prefer topics with distinct_nicks >= {min_distinct_nicks}; mark underrepresented topics in summary text.
 - At most 8 topic_narratives.
+- Use input topic `contexts` and `context_ids` as the main evidence for what was actually discussed.
+- When a topic includes contexts, summarize the connected conversation flow: what prompted it,
+  how people replied, and what concern/question emerged. Do not reduce it to keyword frequency.
 - `executive_summary` and `highlights` must be concrete: name WHAT was discussed
   (which event, balance item, crash symptom/context) — never only "주제명 (N회/M명)".
 - For bug/event/balance topics, each `topic_narratives` entry SHOULD include 1-3 `quote_refs`

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from email_sender import _esc, _esc_ascii, build_vml_button
+from openchat.email_api import _esc, _esc_ascii, build_vml_button
 
 _TAG_STYLE = {
     "bug": ("버그", "#e0e7ff", "#3730a3"),

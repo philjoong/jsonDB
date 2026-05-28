@@ -3,12 +3,34 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 from dotenv import load_dotenv
+
+
+_REPORT_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def normalize_report_send_time(raw: str | None) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if _REPORT_TIME_RE.fullmatch(text) is None:
+        raise ValueError("report_send_time must be HH:MM (24-hour), e.g. 09:00")
+    return text
+
+
+def normalize_analyze_send_time(raw: str | None) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if _REPORT_TIME_RE.fullmatch(text) is None:
+        raise ValueError("analyze_send_time must be HH:MM (24-hour), e.g. 09:00")
+    return text
 
 
 def _env_int(name: str, default: int) -> int:
@@ -46,6 +68,8 @@ class ProjectConfig:
     label: str = ""
     enabled: bool = True
     update_notes_url: str = ""
+    report_send_time: str = ""
+    analyze_send_time: str = ""
     email_sender: str = ""
     email_receivers: list[str] = field(default_factory=list)
 
@@ -58,6 +82,8 @@ class ProjectConfig:
             raise ValueError("ProjectConfig requires title or titles")
         self.titles = norm_titles
         self.title = norm_titles[0]
+        self.report_send_time = normalize_report_send_time(self.report_send_time)
+        self.analyze_send_time = normalize_analyze_send_time(self.analyze_send_time)
 
 
 # Backward-compatible alias (existing code imports RoomConfig)
@@ -113,7 +139,7 @@ class AppSettings:
     tz: str = "Asia/Seoul"
     database_path: Path = Path("data/openchat.db")
     retention_raw_days: int = 7
-    collect_interval_minutes: int = 10
+    collect_interval_minutes: int = 60
     min_distinct_nicks: int = 3
     analyzer_provider: str = "openai"
     openai_api_base: str = "http://localhost:11434/v1"
@@ -124,10 +150,10 @@ class AppSettings:
     analyzer_period: str = "1d"
     analyzer_prompt_version: str = "v1"
     analyzer_use_llm: bool = True
-    analyzer_fallback_heuristic: bool = True
-    analyzer_max_transcript_chars: int = 90_000
+    analyzer_fallback_heuristic: bool = False
+    analyzer_max_transcript_chars: int = 8_000
     analyzer_temperature: float = 0.2
-    analyzer_timeout_seconds: float = 600.0
+    analyzer_timeout_seconds: float = 180.0
     reporter_provider: str = "openai"
     reporter_model: str = "gpt-5.2"
     reporter_api_key: str = ""
@@ -225,6 +251,12 @@ def load_settings(env_path: Path | None = None) -> AppSettings:
                 label=str(item.get("label") or norm_titles[0]),
                 enabled=True,
                 update_notes_url=str(item.get("update_notes_url") or "").strip(),
+                report_send_time=normalize_report_send_time(
+                    item.get("report_send_time")
+                ),
+                analyze_send_time=normalize_analyze_send_time(
+                    item.get("analyze_send_time")
+                ),
                 email_sender=email_sender,
                 email_receivers=email_receivers,
             )
@@ -263,10 +295,10 @@ def load_settings(env_path: Path | None = None) -> AppSettings:
         analyzer_prompt_version=str(os.getenv("ANALYZER_PROMPT_VERSION", "v1")).strip()
         or "v1",
         analyzer_use_llm=_env_bool("ANALYZER_USE_LLM", True),
-        analyzer_fallback_heuristic=_env_bool("ANALYZER_FALLBACK_HEURISTIC", True),
-        analyzer_max_transcript_chars=_env_int("ANALYZER_MAX_TRANSCRIPT_CHARS", 90_000),
+        analyzer_fallback_heuristic=_env_bool("ANALYZER_FALLBACK_HEURISTIC", False),
+        analyzer_max_transcript_chars=_env_int("ANALYZER_MAX_TRANSCRIPT_CHARS", 8_000),
         analyzer_temperature=float(os.getenv("ANALYZER_TEMPERATURE", "0.2")),
-        analyzer_timeout_seconds=float(os.getenv("ANALYZER_TIMEOUT_SECONDS", "600")),
+        analyzer_timeout_seconds=float(os.getenv("ANALYZER_TIMEOUT_SECONDS", "180")),
         reporter_provider=str(os.getenv("REPORTER_PROVIDER", "openai")).strip()
         or "openai",
         reporter_model=str(os.getenv("REPORTER_MODEL", "gpt-5.2")).strip()

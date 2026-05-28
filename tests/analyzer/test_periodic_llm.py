@@ -5,6 +5,8 @@ from datetime import datetime
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from analyzer.bucketizer import Bucket
 from analyzer.llm import AnalyzerLLMError, parse_json_object
 from analyzer.periodic import (
@@ -33,7 +35,7 @@ def test_normalize_llm_payload_distinct_nicks_flag():
         period_end=datetime(2026, 5, 21, 0, 0, tzinfo=TZ),
         message_count=2,
     )
-    cov, topics, patches = normalize_llm_payload(
+    cov, topics = normalize_llm_payload(
         {
             "coverage": "high",
             "topics": [
@@ -44,7 +46,6 @@ def test_normalize_llm_payload_distinct_nicks_flag():
                     "distinct_nicks": 1,
                 }
             ],
-            "patch_reactions": [],
         },
         bucket=bucket,
         message_count=2,
@@ -53,7 +54,47 @@ def test_normalize_llm_payload_distinct_nicks_flag():
     assert cov == "high"
     assert topics[0]["underrepresented"] is True
     assert topics[0]["tag"] == "balance"
-    assert patches == []
+
+
+def test_normalize_llm_payload_attaches_conversation_contexts():
+    bucket = Bucket(
+        room_id="r1",
+        period_key="2026-05-20",
+        period_type="1d",
+        period_start=datetime(2026, 5, 20, 0, 0, tzinfo=TZ),
+        period_end=datetime(2026, 5, 21, 0, 0, tzinfo=TZ),
+        message_count=3,
+    )
+    _cov, topics = normalize_llm_payload(
+        {
+            "coverage": "partial",
+            "conversation_contexts": [
+                {
+                    "context_id": "ctx_balance",
+                    "label": "raid balance replies",
+                    "summary": "Players compared raid tuning after a question.",
+                    "message_ids": [10, 11, 12],
+                    "nicks": ["a", "b"],
+                }
+            ],
+            "topics": [
+                {
+                    "tag": "balance",
+                    "title": "raid balance",
+                    "topic_key": "raid_balance",
+                    "mentions": 3,
+                    "distinct_nicks": 2,
+                    "context_ids": ["ctx_balance"],
+                }
+            ],
+        },
+        bucket=bucket,
+        message_count=3,
+        min_distinct_nicks=3,
+    )
+    assert topics[0]["context_ids"] == ["ctx_balance"]
+    assert topics[0]["contexts"][0]["message_ids"] == [10, 11, 12]
+    assert topics[0]["contexts"][0]["summary"].startswith("Players compared")
 
 
 def test_analyze_bucket_llm_with_mock_client(tmp_path):
@@ -91,7 +132,6 @@ def test_analyze_bucket_llm_with_mock_client(tmp_path):
                 "quote_refs": [{"message_id": 1}],
             }
         ],
-        "patch_reactions": [],
     }
 
     mock_client = MagicMock()
@@ -162,6 +202,114 @@ def test_analyze_bucket_falls_back_on_llm_error(tmp_path, monkeypatch):
     insight = analyze_bucket(conn, bucket, settings)
     assert insight.analyzer_backend == "heuristic_fallback"
     assert insight.topics
+    conn.close()
+
+
+def test_analyze_bucket_raises_on_empty_llm_topics(tmp_path):
+    db_path = tmp_path / "test.db"
+    conn = init_db(db_path)
+    sync_rooms(conn, [RoomConfig(id="r1", title="t1", label="l1")])
+
+    t1 = datetime(2026, 5, 20, 10, 0, tzinfo=TZ)
+    insert_messages(
+        conn,
+        "r1",
+        [
+            ParsedMessage(
+                nick="a",
+                message_at=t1,
+                body="dragon raid balance discussion",
+                content_hash=compute_content_hash(
+                    "r1", "a", t1, "dragon raid balance discussion"
+                ),
+            )
+        ],
+        collected_at=t1,
+    )
+
+    bucket = Bucket(
+        room_id="r1",
+        period_key="2026-05-20",
+        period_type="1d",
+        period_start=datetime(2026, 5, 20, 0, 0, tzinfo=TZ),
+        period_end=datetime(2026, 5, 21, 0, 0, tzinfo=TZ),
+        message_count=1,
+    )
+
+    mock_client = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.choices = [
+        MagicMock(message=MagicMock(content=json.dumps({"coverage": "high", "topics": []})))
+    ]
+    mock_client.chat.completions.create.return_value = mock_resp
+
+    settings = AppSettings(analyzer_fallback_heuristic=False)
+    with pytest.raises(AnalyzerLLMError, match="returned no topics"):
+        analyze_bucket_llm(conn, bucket, settings, client=mock_client)
+    conn.close()
+
+
+def test_analyze_bucket_llm_chunks_large_bucket(tmp_path):
+    db_path = tmp_path / "test.db"
+    conn = init_db(db_path)
+    sync_rooms(conn, [RoomConfig(id="r1", title="t1", label="l1")])
+
+    base = datetime(2026, 5, 20, 10, 0, tzinfo=TZ)
+    messages = []
+    for i in range(8):
+        body = f"raid balance topic {i} " + ("x" * 80)
+        messages.append(
+            ParsedMessage(
+                nick=f"u{i % 3}",
+                message_at=base,
+                body=body,
+                content_hash=compute_content_hash("r1", f"u{i % 3}", base, body),
+            )
+        )
+    insert_messages(conn, "r1", messages, collected_at=base)
+
+    bucket = Bucket(
+        room_id="r1",
+        period_key="2026-05-20",
+        period_type="1d",
+        period_start=datetime(2026, 5, 20, 0, 0, tzinfo=TZ),
+        period_end=datetime(2026, 5, 21, 0, 0, tzinfo=TZ),
+        message_count=len(messages),
+    )
+
+    def _response(title: str, mentions: int):
+        payload = {
+            "coverage": "partial",
+            "topics": [
+                {
+                    "tag": "balance",
+                    "title": title,
+                    "topic_key": "raid_balance",
+                    "mentions": mentions,
+                    "distinct_nicks": 2,
+                    "quote_refs": [{"message_id": 1}],
+                }
+            ],
+        }
+        return MagicMock(
+            choices=[MagicMock(message=MagicMock(content=json.dumps(payload)))]
+        )
+
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.side_effect = [
+        _response("레이드 밸런스", 1) for _ in range(10)
+    ]
+
+    settings = AppSettings(
+        analyzer_fallback_heuristic=False,
+        analyzer_max_transcript_chars=450,
+    )
+    insight = analyze_bucket_llm(conn, bucket, settings, client=mock_client)
+
+    assert mock_client.chat.completions.create.call_count > 1
+    assert insight.topics[0]["title"] == "레이드 밸런스"
+    assert insight.topics[0]["mentions"] == mock_client.chat.completions.create.call_count
+    assert insight.analyzer_backend == "llm"
     conn.close()
 
 

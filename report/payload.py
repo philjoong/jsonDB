@@ -73,6 +73,31 @@ def _compact_topics(topics: list[Any], *, limit: int = 5) -> list[dict[str, Any]
         refs = t.get("quote_refs")
         if isinstance(refs, list) and refs:
             entry["quote_refs"] = refs[:3]
+        context_ids = t.get("context_ids")
+        if isinstance(context_ids, list) and context_ids:
+            entry["context_ids"] = [str(c) for c in context_ids[:5]]
+        contexts = t.get("contexts")
+        if isinstance(contexts, list) and contexts:
+            compact_contexts: list[dict[str, Any]] = []
+            for ctx in contexts[:5]:
+                if not isinstance(ctx, dict):
+                    continue
+                compact_ctx: dict[str, Any] = {
+                    "context_id": ctx.get("context_id"),
+                    "label": ctx.get("label"),
+                    "summary": ctx.get("summary"),
+                    "message_ids": ctx.get("message_ids"),
+                    "first_message_id": ctx.get("first_message_id"),
+                    "last_message_id": ctx.get("last_message_id"),
+                }
+                nicks = ctx.get("nicks")
+                if isinstance(nicks, list) and nicks:
+                    compact_ctx["nicks"] = nicks[:8]
+                compact_contexts.append(
+                    {k: v for k, v in compact_ctx.items() if v not in (None, "", [])}
+                )
+            if compact_contexts:
+                entry["contexts"] = compact_contexts
         out.append(entry)
     return out
 

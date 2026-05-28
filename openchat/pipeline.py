@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo
 
 from analyzer.periodic import analyze_bucket
 from collector.runner import CollectCycleResult, run_collect_cycle
-from context.loader import load_context
 from db.connection import init_db
 from db.insights import PeriodicInsightRow, upsert_periodic_insight
 from db.web_jobs import append_job_log, insert_report_run
@@ -33,6 +32,7 @@ class AnalyzeProjectResult:
     project_id: str
     processed: int
     processed_buckets: list[tuple[str, str]]
+    failed_buckets: list[dict[str, str]]
     already_analyzed: int
     buckets_with_messages: int
 
@@ -70,18 +70,14 @@ def run_analyze_project(
     settings: AppSettings,
     project_id: str,
     *,
-    include_current: bool = True,
-    force: bool = True,
+    include_current: bool = False,
+    force: bool = False,
     limit: int | None = None,
     heuristic: bool = False,
     top_n: int = 12,
     job_id: str | None = None,
 ) -> AnalyzeProjectResult:
     find_project(settings, project_id)
-    context = load_context(
-        patchnotes_path=settings.patchnotes_path,
-        roadmap_path=settings.roadmap_path,
-    )
     room_labels = {r.id: r.label for r in settings.rooms}
     diag = bucketize_diagnostics(
         conn,
@@ -95,20 +91,35 @@ def run_analyze_project(
     )
     processed = 0
     processed_buckets: list[tuple[str, str]] = []
+    failed_buckets: list[dict[str, str]] = []
     for b in diag.queued:
         if b.room_id != project_id:
             continue
         if job_id:
             append_job_log(conn, job_id, f"analyze bucket {b.period_key}")
-        insight = analyze_bucket(
-            conn,
-            b,
-            settings,
-            context=context,
-            room_label=room_labels.get(b.room_id, b.room_id),
-            force_heuristic=heuristic,
-            top_n=top_n,
-        )
+        try:
+            progress = (
+                (lambda line, jid=job_id: append_job_log(conn, jid, line))
+                if job_id
+                else None
+            )
+            insight = analyze_bucket(
+                conn,
+                b,
+                settings,
+                room_label=room_labels.get(b.room_id, b.room_id),
+                force_heuristic=heuristic,
+                top_n=top_n,
+                progress=progress,
+            )
+        except Exception as exc:
+            err = str(exc)
+            failed_buckets.append(
+                {"room_id": b.room_id, "period_key": b.period_key, "error": err}
+            )
+            if job_id:
+                append_job_log(conn, job_id, f"analyze bucket {b.period_key} failed: {err}")
+            continue
         upsert_periodic_insight(
             conn,
             PeriodicInsightRow(
@@ -134,6 +145,7 @@ def run_analyze_project(
         project_id=project_id,
         processed=processed,
         processed_buckets=processed_buckets,
+        failed_buckets=failed_buckets,
         already_analyzed=diag.already_analyzed,
         buckets_with_messages=diag.buckets_with_messages,
     )

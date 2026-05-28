@@ -342,10 +342,16 @@ def run_watch(
     once: bool = False,
 ) -> None:
     """Run collect cycles every COLLECT_INTERVAL_MINUTES until interrupted."""
-    interval_sec = settings.collect_interval_minutes * 60
     cycle_no = 0
 
     while True:
+        # Reload settings every cycle so changes to config/projects.yaml or
+        # config/rooms.yaml (e.g., project id add/rename) are picked up without
+        # restarting the watch process.
+        from openchat.config import load_settings
+
+        settings = load_settings()
+        interval_sec = settings.collect_interval_minutes * 60
         cycle_no += 1
         logger.info("=== Watch cycle %d ===", cycle_no)
         cycle = run_collect_cycle(settings)

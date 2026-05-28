@@ -193,7 +193,12 @@ def _load_analyzed_keys(
     analyzer_version: str,
 ) -> set[tuple[str, str]]:
     analyzed_rows = conn.execute(
-        "SELECT room_id, period_key FROM periodic_insights WHERE analyzer_version = ?",
+        """
+        SELECT room_id, period_key
+        FROM periodic_insights
+        WHERE analyzer_version = ?
+          AND trim(COALESCE(topics_json, '')) NOT IN ('', '[]')
+        """,
         (analyzer_version,),
     ).fetchall()
     return {(str(r["room_id"]), str(r["period_key"])) for r in analyzed_rows}
@@ -371,4 +376,3 @@ def print_bucketize_summary(
             )
         if diag.total_messages == 0:
             print("  - messages 테이블이 비어 있습니다. 먼저 collect를 실행하세요.", file=out)
-

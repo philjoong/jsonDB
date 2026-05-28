@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import os
+import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
@@ -12,20 +16,32 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from db.connection import init_db
-from db.web_jobs import get_report_run, list_jobs_for_project, list_report_runs
+from db.web_jobs import (
+    get_project_last_runs,
+    list_jobs,
+    list_project_last_runs,
+    get_report_run,
+    has_active_job,
+    list_jobs_for_project,
+    list_report_runs,
+)
 from openchat.config import DataScopeConfig, load_settings
 from openchat.job_service import (
     fetch_job,
     job_to_dict,
+    recover_interrupted_jobs,
     submit_analyze,
+    submit_analyze_retry,
     submit_collect,
     submit_report,
     submit_report_and_email,
     submit_report_email,
 )
 from openchat.projects_store import ProjectsStore
+from openchat.report_scheduler import ReportScheduler, project_schedule_view
 from openchat.ui_settings_store import UiSettings, UiSettingsStore
 from stats.project_stats import ProjectStats, query_project_stats
+from analyzer.bucketizer import parse_period_spec
 
 
 class ProjectBody(BaseModel):
@@ -34,6 +50,8 @@ class ProjectBody(BaseModel):
     titles: list[str] = Field(default_factory=list)
     enabled: bool = True
     update_notes_url: str = ""
+    report_send_time: str = ""
+    analyze_send_time: str = ""
     email_sender: str = ""
     email_receivers: list[str] = Field(default_factory=list)
 
@@ -60,6 +78,35 @@ templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 _store: ProjectsStore | None = None
 _ui_store: UiSettingsStore | None = None
+_report_scheduler: ReportScheduler | None = None
+
+
+@dataclass(frozen=True)
+class ProjectNextRuns:
+    next_analyze_at: str | None
+    next_report_at: str | None
+
+
+def _format_relative_time(raw: str | None, tz_name: str, *, none_text: str = "-") -> str:
+    if not raw:
+        return none_text
+    tz = ZoneInfo(tz_name)
+    dt = datetime.fromisoformat(str(raw)).astimezone(tz)
+    now = datetime.now(tz)
+    sec = int((dt - now).total_seconds())
+    abs_sec = abs(sec)
+    if abs_sec < 60:
+        rel = "곧" if sec >= 0 else "방금 전"
+    elif abs_sec < 3600:
+        n = max(1, math.floor(abs_sec / 60))
+        rel = f"{n}분 후" if sec >= 0 else f"{n}분 전"
+    elif abs_sec < 86400:
+        n = max(1, math.floor(abs_sec / 3600))
+        rel = f"{n}시간 후" if sec >= 0 else f"{n}시간 전"
+    else:
+        n = max(1, math.floor(abs_sec / 86400))
+        rel = f"{n}일 후" if sec >= 0 else f"{n}일 전"
+    return rel
 
 
 def get_store() -> ProjectsStore:
@@ -93,6 +140,17 @@ def _scope_to_api(scope: DataScopeConfig) -> dict[str, Any]:
     }
 
 
+def _project_to_api(project) -> dict[str, Any]:
+    data = get_store().project_to_dict(project)
+    sched = project_schedule_view(
+        project,
+        now=datetime.now(ZoneInfo(load_settings().tz)),
+        tz_name=load_settings().tz,
+    )
+    data["next_report_send_at"] = sched.next_send_at
+    return data
+
+
 def _require_project(project_id: str):
     store = get_store()
     project = store.get_project(project_id)
@@ -108,17 +166,90 @@ def _project_detail_context(project_id: str) -> dict[str, Any]:
     try:
         jobs = list_jobs_for_project(conn, project_id, limit=8)
         reports = list_report_runs(conn, project_id=project_id, limit=8)
+        last_runs = get_project_last_runs(conn, project_id)
+        has_active = has_active_job(conn, project_id)
     finally:
         conn.close()
     store = get_store()
+    schedule = project_schedule_view(
+        project,
+        now=datetime.now(ZoneInfo(settings.tz)),
+        tz_name=settings.tz,
+    )
+    next_runs = _build_next_runs_map([project], {project.id: last_runs}, settings)[project.id]
     return {
         "project": project,
         "config_path": store.config_path,
         "jobs": jobs,
         "reports": reports,
+        "last_runs": last_runs,
+        "has_active_job": has_active,
+        "schedule": schedule,
+        "next_runs": next_runs,
         "flash": None,
         "flash_error": None,
+        "fmt_time": _format_relative_time,
+        "tz_name": settings.tz,
     }
+
+
+def _build_project_schedule_map(projects, tz_name: str) -> dict[str, Any]:
+    now = datetime.now(ZoneInfo(tz_name))
+    return {p.id: project_schedule_view(p, now=now, tz_name=tz_name) for p in projects}
+
+
+def _build_last_runs_map(projects) -> dict[str, Any]:
+    settings = load_settings()
+    conn = init_db(settings.database_path)
+    try:
+        return list_project_last_runs(conn, [p.id for p in projects])
+    finally:
+        conn.close()
+
+
+def _analyzer_period_delta(raw: str):
+    spec = parse_period_spec(raw)
+    from datetime import timedelta
+    if spec.unit == "h":
+        return timedelta(hours=spec.size)
+    if spec.unit == "d":
+        return timedelta(days=spec.size)
+    if spec.unit == "w":
+        return timedelta(weeks=spec.size)
+    return timedelta(days=1)
+
+
+def _build_next_runs_map(
+    projects,
+    last_runs_map: dict[str, Any],
+    settings,
+) -> dict[str, ProjectNextRuns]:
+    tz = ZoneInfo(settings.tz)
+    now = datetime.now(tz)
+    out: dict[str, ProjectNextRuns] = {}
+    for p in projects:
+        last = last_runs_map.get(p.id)
+        analyze_time = p.analyze_send_time or "00:00"
+        hh, mm = [int(x) for x in analyze_time.split(":", 1)]
+        today_at = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if now < today_at:
+            next_analyze_at = today_at.isoformat(timespec="seconds")
+        elif not last or not last.last_analyze_at:
+            next_analyze_at = today_at.isoformat(timespec="seconds")
+        else:
+            last_analyze = datetime.fromisoformat(str(last.last_analyze_at)).astimezone(tz)
+            if last_analyze < today_at:
+                next_analyze_at = today_at.isoformat(timespec="seconds")
+            else:
+                next_analyze_at = (today_at + timedelta(days=1)).isoformat(
+                    timespec="seconds"
+                )
+        sched = project_schedule_view(p, now=now, tz_name=settings.tz)
+        out[p.id] = ProjectNextRuns(
+            next_analyze_at=next_analyze_at,
+            next_report_at=sched.next_send_at,
+        )
+    return out
 
 
 def _load_project_stats(project_id: str) -> ProjectStats:
@@ -163,7 +294,11 @@ def create_app() -> FastAPI:
     async def dashboard(request: Request) -> HTMLResponse:
         store = get_store()
         ui_store = get_ui_store()
+        settings = load_settings()
         projects = store.list_projects()
+        schedule_map = _build_project_schedule_map(projects, settings.tz)
+        last_runs_map = _build_last_runs_map(projects)
+        next_runs_map = _build_next_runs_map(projects, last_runs_map, settings)
         saved = request.query_params.get("saved")
         return templates.TemplateResponse(
             request,
@@ -176,18 +311,32 @@ def create_app() -> FastAPI:
                 "project_count": len(projects),
                 "enabled_count": sum(1 for p in projects if p.enabled),
                 "settings_saved": saved == "1",
+                "schedule_map": schedule_map,
+                "last_runs_map": last_runs_map,
+                "next_runs_map": next_runs_map,
+                "fmt_time": _format_relative_time,
+                "tz_name": settings.tz,
             },
         )
 
     @app.get("/projects", response_class=HTMLResponse)
     async def projects_list(request: Request) -> HTMLResponse:
         store = get_store()
+        settings = load_settings()
+        projects = store.list_projects()
+        last_runs_map = _build_last_runs_map(projects)
+        next_runs_map = _build_next_runs_map(projects, last_runs_map, settings)
         return templates.TemplateResponse(
             request,
             "projects_list.html",
             {
-                "projects": store.list_projects(),
+                "projects": projects,
                 "config_path": store.config_path,
+                "schedule_map": _build_project_schedule_map(projects, settings.tz),
+                "last_runs_map": last_runs_map,
+                "next_runs_map": next_runs_map,
+                "fmt_time": _format_relative_time,
+                "tz_name": settings.tz,
             },
         )
 
@@ -207,6 +356,8 @@ def create_app() -> FastAPI:
         titles: Annotated[str, Form()] = "",
         enabled: Annotated[str | None, Form()] = None,
         update_notes_url: Annotated[str, Form()] = "",
+        report_send_time: Annotated[str, Form()] = "",
+        analyze_send_time: Annotated[str, Form()] = "",
         email_sender: Annotated[str, Form()] = "",
         email_receivers: Annotated[str, Form()] = "",
     ):
@@ -219,6 +370,8 @@ def create_app() -> FastAPI:
                 titles=title_list,
                 enabled=enabled == "on",
                 update_notes_url=update_notes_url,
+                report_send_time=report_send_time,
+                analyze_send_time=analyze_send_time,
                 email_sender=email_sender,
                 email_receivers=_parse_receivers(email_receivers),
             )
@@ -235,6 +388,8 @@ def create_app() -> FastAPI:
                         "titles": titles,
                         "enabled": enabled == "on",
                         "update_notes_url": update_notes_url,
+                        "report_send_time": report_send_time,
+                        "analyze_send_time": analyze_send_time,
                     },
                 },
                 status_code=400,
@@ -253,6 +408,15 @@ def create_app() -> FastAPI:
         _require_project(project_id)
         try:
             submit_collect(project_id)
+        except ValueError as exc:
+            ctx = _project_detail_context(project_id)
+            ctx["flash_error"] = str(exc)
+            return templates.TemplateResponse(
+                request,
+                "project_detail.html",
+                ctx,
+                status_code=409,
+            )
         except Exception as exc:
             ctx = _project_detail_context(project_id)
             ctx["flash_error"] = f"수집 실패: {exc}"
@@ -270,13 +434,28 @@ def create_app() -> FastAPI:
     @app.post("/projects/{project_id}/analyze")
     async def project_analyze(project_id: str) -> RedirectResponse:
         _require_project(project_id)
-        submitted = submit_analyze(project_id)
+        try:
+            submitted = submit_analyze(project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return RedirectResponse(url=f"/jobs/{submitted.job_id}", status_code=303)
+
+    @app.post("/projects/{project_id}/analyze-retry")
+    async def project_analyze_retry(project_id: str) -> RedirectResponse:
+        _require_project(project_id)
+        try:
+            submitted = submit_analyze_retry(project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return RedirectResponse(url=f"/jobs/{submitted.job_id}", status_code=303)
 
     @app.post("/projects/{project_id}/report")
     async def project_report(project_id: str) -> RedirectResponse:
         _require_project(project_id)
-        submitted = submit_report(project_id)
+        try:
+            submitted = submit_report(project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return RedirectResponse(url=f"/jobs/{submitted.job_id}", status_code=303)
 
     @app.post("/projects/{project_id}/report-email")
@@ -285,13 +464,19 @@ def create_app() -> FastAPI:
         run_id: Annotated[int | None, Form()] = None,
     ) -> RedirectResponse:
         _require_project(project_id)
-        submitted = submit_report_email(project_id, run_id=run_id)
+        try:
+            submitted = submit_report_email(project_id, run_id=run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return RedirectResponse(url=f"/jobs/{submitted.job_id}", status_code=303)
 
     @app.post("/projects/{project_id}/report-and-email")
     async def project_report_and_email(project_id: str) -> RedirectResponse:
         _require_project(project_id)
-        submitted = submit_report_and_email(project_id)
+        try:
+            submitted = submit_report_and_email(project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return RedirectResponse(url=f"/jobs/{submitted.job_id}", status_code=303)
 
     @app.post("/reports/{run_id}/email")
@@ -316,6 +501,34 @@ def create_app() -> FastAPI:
             request,
             "job_detail.html",
             {"job": job_to_dict(job)},
+        )
+
+    @app.get("/jobs", response_class=HTMLResponse)
+    async def jobs_list_page(
+        request: Request,
+        project_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=300),
+    ) -> HTMLResponse:
+        settings = load_settings()
+        conn = init_db(settings.database_path)
+        try:
+            jobs = list_jobs(conn, project_id=project_id, status=status, limit=limit)
+        finally:
+            conn.close()
+        active_count = sum(1 for j in jobs if j.status in ("pending", "running"))
+        projects = get_store().list_projects()
+        return templates.TemplateResponse(
+            request,
+            "jobs_list.html",
+            {
+                "jobs": [job_to_dict(j) for j in jobs],
+                "projects": projects,
+                "filter_project_id": project_id or "",
+                "filter_status": status or "",
+                "limit": limit,
+                "active_count": active_count,
+            },
         )
 
     @app.get("/reports", response_class=HTMLResponse)
@@ -369,6 +582,74 @@ def create_app() -> FastAPI:
     async def api_project_stats(project_id: str) -> dict[str, Any]:
         return _load_project_stats(project_id).to_dict()
 
+    @app.get("/api/projects/{project_id}/topic-contexts")
+    async def api_topic_contexts(
+        project_id: str,
+        topic_key: str = Query(...),
+        tag: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        settings = load_settings()
+        conn = init_db(settings.database_path)
+        try:
+            from stats.project_stats import resolve_data_window, _safe_json_list
+            window = resolve_data_window(settings)
+            insight_rows = conn.execute(
+                """
+                SELECT period_key, period_start, period_end, topics_json
+                FROM periodic_insights
+                WHERE room_id = ?
+                  AND period_end >= ?
+                  AND period_start < ?
+                ORDER BY period_key ASC
+                """,
+                (project_id, window.window_start_iso, window.window_end_iso),
+            ).fetchall()
+
+            all_contexts: list[dict[str, Any]] = []
+            all_message_ids: list[int] = []
+            for row in insight_rows:
+                for topic in _safe_json_list(row["topics_json"]):
+                    if str(topic.get("topic_key") or "") != topic_key:
+                        continue
+                    if tag and str(topic.get("tag") or "") != tag:
+                        continue
+                    period_key = str(row["period_key"])
+                    for ctx in (topic.get("contexts") or []):
+                        enriched = dict(ctx)
+                        enriched["period_key"] = period_key
+                        enriched["period_start"] = str(row["period_start"])
+                        enriched["period_end"] = str(row["period_end"])
+                        all_contexts.append(enriched)
+                        for mid in (ctx.get("message_ids") or []):
+                            if isinstance(mid, int):
+                                all_message_ids.append(mid)
+
+            messages_by_id: dict[int, dict[str, Any]] = {}
+            if all_message_ids:
+                placeholders = ",".join("?" * len(all_message_ids))
+                msg_rows = conn.execute(
+                    f"SELECT message_id, nick, message_at, body FROM messages WHERE message_id IN ({placeholders})",
+                    all_message_ids,
+                ).fetchall()
+                for m in msg_rows:
+                    messages_by_id[int(m["message_id"])] = {
+                        "message_id": int(m["message_id"]),
+                        "nick": str(m["nick"] or ""),
+                        "message_at": str(m["message_at"] or ""),
+                        "body": str(m["body"] or ""),
+                    }
+
+            for ctx in all_contexts:
+                ctx["messages"] = [
+                    messages_by_id[mid]
+                    for mid in (ctx.get("message_ids") or [])
+                    if mid in messages_by_id
+                ]
+        finally:
+            conn.close()
+
+        return {"topic_key": topic_key, "tag": tag, "contexts": all_contexts}
+
     @app.get("/projects/{project_id}/edit", response_class=HTMLResponse)
     async def project_edit_form(request: Request, project_id: str) -> HTMLResponse:
         store = get_store()
@@ -389,6 +670,8 @@ def create_app() -> FastAPI:
         titles: Annotated[str, Form()] = "",
         enabled: Annotated[str | None, Form()] = None,
         update_notes_url: Annotated[str, Form()] = "",
+        report_send_time: Annotated[str, Form()] = "",
+        analyze_send_time: Annotated[str, Form()] = "",
         email_sender: Annotated[str, Form()] = "",
         email_receivers: Annotated[str, Form()] = "",
     ):
@@ -404,6 +687,8 @@ def create_app() -> FastAPI:
                 titles=title_list,
                 enabled=enabled == "on",
                 update_notes_url=update_notes_url,
+                report_send_time=report_send_time,
+                analyze_send_time=analyze_send_time,
                 email_sender=email_sender,
                 email_receivers=_parse_receivers(email_receivers),
             )
@@ -419,11 +704,32 @@ def create_app() -> FastAPI:
                         "titles": titles,
                         "enabled": enabled == "on",
                         "update_notes_url": update_notes_url,
+                        "report_send_time": report_send_time,
+                        "analyze_send_time": analyze_send_time,
                     },
                 },
                 status_code=400,
             )
         return RedirectResponse(url=f"/projects/{project_id}", status_code=303)
+
+    @app.post("/projects/{project_id}/times", response_model=None)
+    async def project_update_times(
+        project_id: str,
+        analyze_send_time: Annotated[str, Form()] = "",
+        report_send_time: Annotated[str, Form()] = "",
+    ) -> RedirectResponse:
+        store = get_store()
+        try:
+            store.update_project(
+                project_id,
+                analyze_send_time=analyze_send_time,
+                report_send_time=report_send_time,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return RedirectResponse(url="/projects", status_code=303)
 
     @app.post("/projects/{project_id}/delete")
     async def project_delete(project_id: str) -> RedirectResponse:
@@ -513,7 +819,7 @@ def create_app() -> FastAPI:
     @app.get("/api/projects")
     async def api_list_projects() -> list[dict[str, Any]]:
         store = get_store()
-        return [store.project_to_dict(p) for p in store.list_projects()]
+        return [_project_to_api(p) for p in store.list_projects()]
 
     @app.post("/api/projects", status_code=201)
     async def api_create_project(payload: ProjectBody) -> dict[str, Any]:
@@ -527,12 +833,14 @@ def create_app() -> FastAPI:
                 titles=payload.titles,
                 enabled=payload.enabled,
                 update_notes_url=payload.update_notes_url,
+                report_send_time=payload.report_send_time,
+                analyze_send_time=payload.analyze_send_time,
                 email_sender=payload.email_sender,
                 email_receivers=payload.email_receivers,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return store.project_to_dict(project)
+        return _project_to_api(project)
 
     @app.get("/api/projects/{project_id}")
     async def api_get_project(project_id: str) -> dict[str, Any]:
@@ -540,7 +848,7 @@ def create_app() -> FastAPI:
         project = store.get_project(project_id)
         if project is None:
             raise HTTPException(status_code=404, detail="project not found")
-        return store.project_to_dict(project)
+        return _project_to_api(project)
 
     @app.put("/api/projects/{project_id}")
     async def api_update_project(
@@ -554,6 +862,8 @@ def create_app() -> FastAPI:
                 titles=payload.titles if payload.titles else None,
                 enabled=payload.enabled,
                 update_notes_url=payload.update_notes_url,
+                report_send_time=payload.report_send_time or None,
+                analyze_send_time=payload.analyze_send_time or None,
                 email_sender=payload.email_sender or None,
                 email_receivers=payload.email_receivers or None,
             )
@@ -561,7 +871,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return store.project_to_dict(project)
+        return _project_to_api(project)
 
     @app.delete("/api/projects/{project_id}", status_code=204)
     async def api_delete_project(project_id: str) -> None:
@@ -620,6 +930,8 @@ def create_app() -> FastAPI:
         _require_project(project_id)
         try:
             submitted = submit_collect(project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         job = fetch_job(submitted.job_id)
@@ -628,13 +940,19 @@ def create_app() -> FastAPI:
     @app.post("/api/projects/{project_id}/analyze", status_code=202)
     async def api_project_analyze(project_id: str) -> dict[str, Any]:
         _require_project(project_id)
-        submitted = submit_analyze(project_id)
+        try:
+            submitted = submit_analyze(project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"job_id": submitted.job_id, "status": "pending", "kind": "analyze"}
 
     @app.post("/api/projects/{project_id}/report", status_code=202)
     async def api_project_report(project_id: str) -> dict[str, Any]:
         _require_project(project_id)
-        submitted = submit_report(project_id)
+        try:
+            submitted = submit_report(project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"job_id": submitted.job_id, "status": "pending", "kind": "report"}
 
     @app.post("/api/projects/{project_id}/report-email", status_code=202)
@@ -643,7 +961,10 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         _require_project(project_id)
         run_id = payload.run_id if payload else None
-        submitted = submit_report_email(project_id, run_id=run_id)
+        try:
+            submitted = submit_report_email(project_id, run_id=run_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
             "job_id": submitted.job_id,
             "status": "pending",
@@ -654,7 +975,10 @@ def create_app() -> FastAPI:
     @app.post("/api/projects/{project_id}/report-and-email", status_code=202)
     async def api_project_report_and_email(project_id: str) -> dict[str, Any]:
         _require_project(project_id)
-        submitted = submit_report_and_email(project_id)
+        try:
+            submitted = submit_report_and_email(project_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
             "job_id": submitted.job_id,
             "status": "pending",
@@ -667,6 +991,20 @@ def create_app() -> FastAPI:
         if job is None:
             raise HTTPException(status_code=404, detail="job not found")
         return job_to_dict(job)
+
+    @app.get("/api/jobs")
+    async def api_list_jobs(
+        project_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=300),
+    ) -> list[dict[str, Any]]:
+        settings = load_settings()
+        conn = init_db(settings.database_path)
+        try:
+            rows = list_jobs(conn, project_id=project_id, status=status, limit=limit)
+        finally:
+            conn.close()
+        return [job_to_dict(r) for r in rows]
 
     @app.get("/api/reports")
     async def api_list_reports(
@@ -761,6 +1099,22 @@ def _parse_receivers(raw: str) -> list[str]:
 app = create_app()
 
 
+@app.on_event("startup")
+async def _startup_scheduler() -> None:
+    global _report_scheduler
+    recover_interrupted_jobs()
+    if _report_scheduler is None:
+        _report_scheduler = ReportScheduler()
+    _report_scheduler.start()
+
+
+@app.on_event("shutdown")
+async def _shutdown_scheduler() -> None:
+    global _report_scheduler
+    if _report_scheduler is not None:
+        _report_scheduler.stop()
+
+
 def run_server(*, host: str | None = None, port: int | None = None) -> None:
     import uvicorn
 
@@ -771,4 +1125,5 @@ def run_server(*, host: str | None = None, port: int | None = None) -> None:
         host=bind_host,
         port=bind_port,
         reload=os.getenv("SERVE_RELOAD", "").lower() in ("1", "true", "yes"),
+        access_log=False,
     )

@@ -154,3 +154,26 @@ def test_webapp_project_actions(tmp_path: Path, monkeypatch):
     post_report = client.post("/projects/p1/report", follow_redirects=False)
     assert post_report.status_code == 303
     assert post_report.headers["location"] == "/jobs/r1"
+
+
+def test_webapp_project_action_conflict_returns_409(tmp_path: Path, monkeypatch):
+    cfg = tmp_path / "projects.yaml"
+    ui_cfg = tmp_path / "ui_settings.yaml"
+    db = tmp_path / "t.db"
+    _write_projects(
+        cfg,
+        [{"id": "p1", "label": "P1", "enabled": True, "titles": ["Room A"]}],
+    )
+    monkeypatch.setenv("PROJECTS_CONFIG", str(cfg))
+    monkeypatch.setenv("UI_SETTINGS_CONFIG", str(ui_cfg))
+    monkeypatch.setenv("DATABASE_PATH", str(db))
+    webapp._store = ProjectsStore(cfg)
+    webapp._ui_store = None
+
+    def _raise_conflict(project_id: str):
+        raise ValueError(f"project '{project_id}' already has a running/pending job")
+
+    monkeypatch.setattr(webapp, "submit_report", _raise_conflict)
+    client = TestClient(webapp.app)
+    resp = client.post("/api/projects/p1/report")
+    assert resp.status_code == 409

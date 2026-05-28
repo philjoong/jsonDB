@@ -1,7 +1,7 @@
-{% extends "base.html" %}
-{% block title %}프로젝트 — OpenChat{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}설정 | OpenChat{% endblock %}
 {% block content %}
-<h1>프로젝트</h1>
+<h1>설정</h1>
 <p class="muted">설정 파일: <code>{{ config_path }}</code></p>
 <div class="actions" style="margin-bottom:1rem">
   <a class="btn btn-primary" href="/projects/new">새 프로젝트</a>
@@ -10,15 +10,28 @@
   {% if projects %}
   <table>
     <thead>
-      <tr><th>ID</th><th>라벨</th><th>titles</th><th></th></tr>
+      <tr><th>ID</th><th>이름</th><th>titles</th><th>분석 기준</th><th>발송 시각</th><th>Next report</th><th>Last analyze</th><th>Next analyze</th><th>Last report</th><th></th></tr>
     </thead>
     <tbody>
       {% for p in projects %}
       <tr>
-        <td><a href="/projects/{{ p.id }}">{{ p.id }}</a></td>
+        <td><a href="/stats/projects/{{ p.id }}">{{ p.id }}</a></td>
         <td>{{ p.label }}</td>
         <td>{{ p.titles | join(", ") }}</td>
-        <td><a class="btn" href="/projects/{{ p.id }}/edit">수정</a></td>
+        <td>{{ p.analyze_send_time or "00:00 (기본)" }}</td>
+        <td>{{ p.report_send_time or "월요일 08:00 (기본)" }}</td>
+        <td>{{ fmt_time(next_runs_map[p.id].next_report_at, tz_name) }}</td>
+        <td>{{ fmt_time(last_runs_map[p.id].last_analyze_at, tz_name) }}</td>
+        <td>{{ fmt_time(next_runs_map[p.id].next_analyze_at, tz_name) }}</td>
+        <td>{{ fmt_time(last_runs_map[p.id].last_report_at, tz_name) }}</td>
+        <td>
+          <form method="post" action="/projects/{{ p.id }}/times" style="display:inline">
+            <input type="text" name="analyze_send_time" value="{{ p.analyze_send_time }}" placeholder="00:00" pattern="^([01]\d|2[0-3]):([0-5]\d)$" style="width:86px">
+            <input type="text" name="report_send_time" value="{{ p.report_send_time }}" placeholder="08:00" pattern="^([01]\d|2[0-3]):([0-5]\d)$" style="width:86px">
+            <button type="submit" class="btn">시간 저장</button>
+          </form>
+          <a class="btn" href="/projects/{{ p.id }}/edit">상세 수정</a>
+        </td>
       </tr>
       {% endfor %}
     </tbody>

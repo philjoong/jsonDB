@@ -40,6 +40,14 @@ class ReportRunRow:
     email_snapshot_json: str | None = None
 
 
+@dataclass
+class ProjectLastRuns:
+    project_id: str
+    last_collect_at: str | None
+    last_analyze_at: str | None
+    last_report_at: str | None
+
+
 def _row_to_job(row: sqlite3.Row) -> BackgroundJob:
     raw = row["result_json"]
     result = None
@@ -158,6 +166,35 @@ def list_jobs_for_project(
     return [_row_to_job(r) for r in rows]
 
 
+def list_jobs(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[BackgroundJob]:
+    where_parts: list[str] = []
+    params: list[Any] = []
+    if project_id:
+        where_parts.append("project_id = ?")
+        params.append(project_id)
+    if status:
+        where_parts.append("status = ?")
+        params.append(status)
+
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    rows = conn.execute(
+        f"""
+        SELECT * FROM background_jobs
+        {where_sql}
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (*params, int(limit)),
+    ).fetchall()
+    return [_row_to_job(r) for r in rows]
+
+
 def insert_report_run(
     conn: sqlite3.Connection,
     *,
@@ -268,3 +305,130 @@ def get_report_run(conn: sqlite3.Connection, run_id: int) -> ReportRunRow | None
         if "email_snapshot_json" in row.keys()
         else None,
     )
+
+
+def has_active_job(conn: sqlite3.Connection, project_id: str, kind: str | None = None) -> bool:
+    if kind is not None:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM background_jobs
+            WHERE project_id = ?
+              AND kind = ?
+              AND status IN ('pending', 'running')
+            LIMIT 1
+            """,
+            (project_id, kind),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM background_jobs
+            WHERE project_id = ?
+              AND status IN ('pending', 'running')
+            LIMIT 1
+            """,
+            (project_id,),
+        ).fetchone()
+    return row is not None
+
+
+def fail_active_jobs(
+    conn: sqlite3.Connection,
+    *,
+    finished_at: datetime,
+    reason: str,
+    project_id: str | None = None,
+) -> int:
+    """Mark pending/running jobs as failed after the worker process was interrupted."""
+    params: list[Any] = [
+        finished_at.isoformat(timespec="seconds"),
+        reason,
+        f"auto-failed: {reason}\n",
+    ]
+    project_sql = ""
+    if project_id:
+        project_sql = " AND project_id = ?"
+        params.append(project_id)
+    cur = conn.execute(
+        f"""
+        UPDATE background_jobs
+        SET status = 'failed',
+            finished_at = COALESCE(finished_at, ?),
+            error = COALESCE(error, ?),
+            log_text = COALESCE(log_text, '') || ?
+        WHERE status IN ('pending', 'running')
+        {project_sql}
+        """,
+        tuple(params),
+    )
+    conn.commit()
+    return int(cur.rowcount or 0)
+
+
+def get_project_last_runs(conn: sqlite3.Connection, project_id: str) -> ProjectLastRuns:
+    collect_row = conn.execute(
+        """
+        SELECT MAX(finished_at) AS ts
+        FROM collect_runs
+        WHERE room_id = ?
+          AND status = 'ok'
+        """,
+        (project_id,),
+    ).fetchone()
+    analyze_row = conn.execute(
+        """
+        SELECT MAX(finished_at) AS ts
+        FROM background_jobs
+        WHERE project_id = ?
+          AND kind IN ('analyze', 'collect_analyze_report_email')
+          AND status = 'succeeded'
+        """,
+        (project_id,),
+    ).fetchone()
+    report_row = conn.execute(
+        """
+        SELECT MAX(created_at) AS ts
+        FROM report_runs
+        WHERE project_id = ?
+        """,
+        (project_id,),
+    ).fetchone()
+    return ProjectLastRuns(
+        project_id=project_id,
+        last_collect_at=collect_row["ts"] if collect_row else None,
+        last_analyze_at=analyze_row["ts"] if analyze_row else None,
+        last_report_at=report_row["ts"] if report_row else None,
+    )
+
+
+def list_project_last_runs(
+    conn: sqlite3.Connection,
+    project_ids: list[str],
+) -> dict[str, ProjectLastRuns]:
+    out: dict[str, ProjectLastRuns] = {}
+    for pid in project_ids:
+        out[pid] = get_project_last_runs(conn, pid)
+    return out
+
+
+def has_report_email_sent_since(
+    conn: sqlite3.Connection,
+    *,
+    project_id: str,
+    since_at: str,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM background_jobs
+        WHERE project_id = ?
+          AND kind IN ('report_and_email', 'report_email')
+          AND status = 'succeeded'
+          AND finished_at >= ?
+        LIMIT 1
+        """,
+        (project_id, since_at),
+    ).fetchone()
+    return row is not None

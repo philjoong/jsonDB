@@ -1,5 +1,5 @@
-{% extends "base.html" %}
-{% block title %}{{ stats.project_label }} 통계 — OpenChat{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}{{ stats.project_label }} 통계 | OpenChat{% endblock %}
 {% block content %}
 <h1>{{ stats.project_label }} 통계</h1>
 <p class="muted">
@@ -14,13 +14,18 @@
   <table>
     <tbody>
       <tr><th>메시지 수</th><td>{{ stats.message_count }}</td></tr>
-      <tr><th>참여 닉 (distinct)</th><td>{{ stats.distinct_nicks }}</td></tr>
+      <tr><th>참여자 수 (distinct)</th><td>{{ stats.distinct_nicks }}</td></tr>
       <tr><th>분석 버킷</th><td>{{ stats.insight_bucket_count }} (기간 {{ stats.period_keys | length }}개)</td></tr>
     </tbody>
   </table>
   <div class="actions">
-    <a class="btn" href="/projects/{{ stats.project_id }}">프로젝트</a>
-    <a class="btn btn-primary" href="/projects/{{ stats.project_id }}">실행 · 리포트</a>
+    <a class="btn" href="/projects/{{ stats.project_id }}">설정</a>
+    <form method="post" action="/projects/{{ stats.project_id }}/analyze-retry" style="display:inline">
+      <button type="submit" class="btn btn-primary">분석 실행</button>
+    </form>
+    <form method="post" action="/projects/{{ stats.project_id }}/report-email" style="display:inline">
+      <button type="submit" class="btn">리포트 발송</button>
+    </form>
   </div>
 </div>
 
@@ -28,7 +33,7 @@
 <div class="card">
   <h2>일별 메시지 (message_at)</h2>
   <table>
-    <thead><tr><th>날짜</th><th>메시지</th><th>참여 닉</th></tr></thead>
+    <thead><tr><th>날짜</th><th>메시지</th><th>참여자 수</th></tr></thead>
     <tbody>
       {% for row in stats.messages_by_day %}
       <tr>
@@ -47,13 +52,17 @@
   {% if stats.top_topics %}
   <table>
     <thead>
-      <tr><th>태그</th><th>주제</th><th>언급</th><th>참여 닉</th></tr>
+      <tr><th>태그</th><th>주제</th><th>언급</th><th>참여자 수</th></tr>
     </thead>
     <tbody>
       {% for t in stats.top_topics %}
-      <tr>
-        <td>{{ t.tag or "—" }}</td>
-        <td>{{ t.title or t.topic_key or "—" }}</td>
+      <tr class="topic-row" style="cursor:pointer"
+          data-project-id="{{ stats.project_id }}"
+          data-topic-key="{{ t.topic_key or '' }}"
+          data-tag="{{ t.tag or '' }}"
+          title="클릭하면 관련 대화 맥락을 확인할 수 있습니다">
+        <td>{{ t.tag or "-" }}</td>
+        <td>{{ t.title or t.topic_key or "-" }}</td>
         <td>{{ t.mentions }}</td>
         <td>{{ t.distinct_nicks }}</td>
       </tr>
@@ -65,12 +74,98 @@
   {% endif %}
 </div>
 
+<!-- 대화 맥락 모달 -->
+<div id="ctx-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:1000;overflow-y:auto">
+  <div style="background:#fff;max-width:720px;margin:2rem auto;border-radius:8px;padding:1.5rem;position:relative">
+    <button onclick="document.getElementById('ctx-modal').style.display='none'"
+            style="position:absolute;top:1rem;right:1rem;background:none;border:none;font-size:1.25rem;cursor:pointer">✕</button>
+    <h2 id="ctx-modal-title" style="margin:0 0 0.5rem;font-size:1.1rem"></h2>
+    <p id="ctx-modal-meta" class="muted" style="margin:0 0 1rem;font-size:0.85rem"></p>
+    <div id="ctx-modal-body"></div>
+  </div>
+</div>
+
+<script>
+(function() {
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function renderContexts(contexts) {
+    if (!contexts.length) return '<p class="muted">저장된 대화 맥락이 없습니다.</p>';
+    return contexts.map(function(ctx) {
+      var msgs = (ctx.messages || []).map(function(m) {
+        var ts = m.message_at ? m.message_at.substring(0,16).replace('T',' ') : '';
+        return '<tr><td style="white-space:nowrap;color:#666;font-size:0.82rem;padding:0.3rem 0.5rem">'
+          + escHtml(ts) + '</td>'
+          + '<td style="white-space:nowrap;font-weight:600;padding:0.3rem 0.5rem">' + escHtml(m.nick) + '</td>'
+          + '<td style="padding:0.3rem 0.5rem">' + escHtml(m.body) + '</td></tr>';
+      }).join('');
+      var header = '<div style="margin-bottom:1rem;padding:0.75rem;background:#f6f7f9;border-radius:6px">'
+        + '<div style="font-weight:600;margin-bottom:0.25rem">' + escHtml(ctx.label || ctx.context_id || '') + '</div>'
+        + (ctx.summary ? '<div style="font-size:0.88rem;color:#555;margin-bottom:0.4rem">' + escHtml(ctx.summary) + '</div>' : '')
+        + '<div style="font-size:0.8rem;color:#888">'
+        + escHtml(ctx.period_start ? ctx.period_start.substring(0,10) : '') + ' ~ '
+        + escHtml(ctx.period_end   ? ctx.period_end.substring(0,10)   : '')
+        + (ctx.nicks && ctx.nicks.length ? ' · 참여: ' + escHtml(ctx.nicks.join(', ')) : '')
+        + '</div></div>';
+      if (!msgs) return header;
+      return header + '<div style="overflow-x:auto;margin-bottom:1.5rem"><table style="width:100%;border-collapse:collapse;font-size:0.88rem">'
+        + '<thead><tr>'
+        + '<th style="text-align:left;padding:0.3rem 0.5rem;border-bottom:1px solid #e5e7eb;color:#888;font-size:0.8rem">시각</th>'
+        + '<th style="text-align:left;padding:0.3rem 0.5rem;border-bottom:1px solid #e5e7eb;color:#888;font-size:0.8rem">닉네임</th>'
+        + '<th style="text-align:left;padding:0.3rem 0.5rem;border-bottom:1px solid #e5e7eb;color:#888;font-size:0.8rem">메시지</th>'
+        + '</tr></thead><tbody>' + msgs + '</tbody></table></div>';
+    }).join('');
+  }
+
+  document.addEventListener('click', function(e) {
+    var row = e.target.closest('.topic-row');
+    if (!row) return;
+    var projectId = row.dataset.projectId;
+    var topicKey  = row.dataset.topicKey;
+    var tag       = row.dataset.tag;
+    var title     = row.querySelector('td:nth-child(2)').textContent.trim();
+
+    var modal = document.getElementById('ctx-modal');
+    var modalTitle = document.getElementById('ctx-modal-title');
+    var modalMeta  = document.getElementById('ctx-modal-meta');
+    var modalBody  = document.getElementById('ctx-modal-body');
+
+    modalTitle.textContent = title;
+    modalMeta.textContent  = '불러오는 중…';
+    modalBody.innerHTML    = '';
+    modal.style.display    = 'block';
+
+    var url = '/api/projects/' + encodeURIComponent(projectId)
+      + '/topic-contexts?topic_key=' + encodeURIComponent(topicKey)
+      + (tag ? '&tag=' + encodeURIComponent(tag) : '');
+
+    fetch(url)
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var ctxs = data.contexts || [];
+        modalMeta.textContent = '기간 전체 맥락 ' + ctxs.length + '개';
+        modalBody.innerHTML = renderContexts(ctxs);
+      })
+      .catch(function(err) {
+        modalMeta.textContent = '';
+        modalBody.innerHTML = '<p style="color:#dc2626">불러오기 실패: ' + escHtml(String(err)) + '</p>';
+      });
+  });
+
+  document.getElementById('ctx-modal').addEventListener('click', function(e) {
+    if (e.target === this) this.style.display = 'none';
+  });
+})();
+</script>
+
 <div class="card">
   <h2>패치 반응 상위</h2>
   {% if stats.top_patches %}
   <table>
     <thead>
-      <tr><th>패치 항목</th><th>성향</th><th>언급</th><th>참여 닉</th><th>요약</th></tr>
+      <tr><th>패치 항목</th><th>성향</th><th>언급</th><th>참여자 수</th><th>요약</th></tr>
     </thead>
     <tbody>
       {% for p in stats.top_patches %}
@@ -79,7 +174,7 @@
         <td>{{ p.stance }}</td>
         <td>{{ p.mentions }}</td>
         <td>{{ p.distinct_nicks }}</td>
-        <td>{{ p.summary or "—" }}</td>
+        <td>{{ p.summary or "-" }}</td>
       </tr>
       {% endfor %}
     </tbody>

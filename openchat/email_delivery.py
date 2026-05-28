@@ -9,7 +9,7 @@ from typing import Any
 
 from db.connection import init_db
 from db.web_jobs import get_report_run, list_report_runs
-from email_sender import send_html_email
+from openchat.email_api import send_html_email
 from openchat.config import load_settings
 from openchat.pipeline import find_project
 from report.openchat_email import build_openchat_report_email_html

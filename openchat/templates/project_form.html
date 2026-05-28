@@ -1,5 +1,5 @@
-{% extends "base.html" %}
-{% block title %}{% if project %}수정{% else %}새 프로젝트{% endif %} — OpenChat{% endblock %}
+﻿{% extends "base.html" %}
+{% block title %}{% if project %}수정{% else %}새 프로젝트{% endif %} | OpenChat{% endblock %}
 {% block content %}
 <h1>{% if project %}프로젝트 수정{% else %}새 프로젝트{% endif %}</h1>
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
@@ -12,15 +12,31 @@
     {% else %}
     <p><strong>ID:</strong> {{ project.id }}</p>
     {% endif %}
-    <label for="label">라벨</label>
+
+    <label for="label">이름</label>
     <input type="text" id="label" name="label"
            value="{% if form %}{{ form.label }}{% elif project %}{{ project.label }}{% endif %}">
+
     <label for="titles">카카오톡 창 제목 (한 줄에 하나)</label>
-    <textarea id="titles" name="titles" required placeholder="리니지m방&#10;리니지m방 2">{% if form %}{{ form.titles }}{% elif project %}{{ project.titles | join('\n') }}{% endif %}</textarea>
-    <p class="muted">창 제목 끝의 (N) 안 읽음 수는 수집 시 자동으로 무시됩니다.</p>
+    <textarea id="titles" name="titles" required placeholder="리니지m방&#10;리니지m방2">{% if form %}{{ form.titles }}{% elif project %}{{ project.titles | join('\n') }}{% endif %}</textarea>
+    <p class="muted">창 제목 끝의 (N) 같은 숫자는 수집 시 자동으로 무시됩니다.</p>
+
     <label for="update_notes_url">업데이트 노트 URL</label>
     <input type="url" id="update_notes_url" name="update_notes_url"
            value="{% if form %}{{ form.update_notes_url }}{% elif project %}{{ project.update_notes_url }}{% endif %}">
+
+    <label for="analyze_send_time">분석 기준 시각 (HH:MM)</label>
+    <input type="text" id="analyze_send_time" name="analyze_send_time"
+           value="{% if form %}{{ form.analyze_send_time }}{% elif project %}{{ project.analyze_send_time }}{% endif %}"
+           placeholder="09:00" pattern="^([01]\d|2[0-3]):([0-5]\d)$">
+    <p class="muted">비워두면 마지막 분석 시각 + analyzer period(예: 1d) 기준으로 다음 분석 시각이 계산됩니다.</p>
+
+    <label for="report_send_time">리포트 발송 기준 시각 (HH:MM)</label>
+    <input type="text" id="report_send_time" name="report_send_time"
+           value="{% if form %}{{ form.report_send_time }}{% elif project %}{{ project.report_send_time }}{% endif %}"
+           placeholder="09:00" pattern="^([01]\d|2[0-3]):([0-5]\d)$">
+    <p class="muted">비워두면 자동 리포트 발송 스케줄은 동작하지 않습니다.</p>
+
     <h2 style="margin-top:1.25rem">이메일 (리포트 발송)</h2>
     <p class="muted">발송 API 주소(<code>EMAIL_API_BASE_URL</code>)는 .env에 설정합니다.</p>
     <label for="email_sender">발송인 (sender)</label>
@@ -28,10 +44,12 @@
            value="{% if form %}{{ form.email_sender }}{% elif project %}{{ project.email_sender }}{% endif %}">
     <label for="email_receivers">수신인 (한 줄에 하나)</label>
     <textarea id="email_receivers" name="email_receivers" rows="3" placeholder="a@company.com&#10;b@company.com">{% if form %}{{ form.email_receivers }}{% elif project %}{{ project.email_receivers | join('\n') }}{% endif %}</textarea>
+
     <label style="display:flex;align-items:center;gap:0.5rem;margin-top:1rem">
       <input type="checkbox" name="enabled" {% if form %}{% if form.enabled %}checked{% endif %}{% elif project is none or project.enabled %}checked{% endif %}>
       활성 (수집 대상)
     </label>
+
     <div class="actions">
       <button type="submit" class="btn btn-primary">저장</button>
       <a class="btn" href="{% if project %}/projects/{{ project.id }}{% else %}/projects{% endif %}">취소</a>

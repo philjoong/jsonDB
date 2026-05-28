@@ -25,15 +25,8 @@ def test_projects_store_crud(tmp_path: Path, monkeypatch):
     cfg = tmp_path / "projects.yaml"
     _write_projects(
         cfg,
-        [
-            {
-                "id": "p1",
-                "label": "P1",
-                "enabled": True,
-                "titles": ["방1"],
-            }
-        ],
-        exclude_nicks=["봇"],
+        [{"id": "p1", "label": "P1", "enabled": True, "titles": ["Room A"]}],
+        exclude_nicks=["bot"],
     )
     monkeypatch.setenv("PROJECTS_CONFIG", str(cfg))
 
@@ -43,13 +36,15 @@ def test_projects_store_crud(tmp_path: Path, monkeypatch):
     store.create_project(
         project_id="p2",
         label="P2",
-        titles=["방A", "방B"],
+        titles=["Room B", "Room C"],
         update_notes_url="https://example.com",
+        report_send_time="09:00",
     )
     assert len(store.list_projects()) == 2
     p2 = store.get_project("p2")
     assert p2 is not None
-    assert p2.titles == ["방A", "방B"]
+    assert p2.titles == ["Room B", "Room C"]
+    assert p2.report_send_time == "09:00"
 
     store.update_project("p2", label="P2-updated", enabled=False)
     p2 = store.get_project("p2")
@@ -62,10 +57,11 @@ def test_projects_store_crud(tmp_path: Path, monkeypatch):
 
     reloaded = load_projects_document(cfg)
     assert len(reloaded.projects) == 1
-    assert reloaded.exclude_nicks == ["봇"]
+    assert reloaded.exclude_nicks == ["bot"]
     on_disk = yaml.safe_load(cfg.read_text(encoding="utf-8"))
     assert "projects" in on_disk
-    assert on_disk["projects"][0]["titles"] == ["방A", "방B"]
+    assert on_disk["projects"][0]["titles"] == ["Room B", "Room C"]
+    assert on_disk["projects"][0]["report_send_time"] == "09:00"
 
 
 def test_projects_store_reload(tmp_path: Path, monkeypatch):
